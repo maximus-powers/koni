@@ -7701,9 +7701,39 @@ export interface ApprovedChangeObligationContext {
   readonly approvedApplicationSha256: Sha256Digest;
   readonly targetNodeIds: readonly string[];
   readonly summary: string;
+  /** Reviewed structured application selection; request/reason diagnostic text is excluded. */
+  readonly selectionSummary?: string;
+  /** Selected proposal result only; aggregate request/reason text is contextual, not value authority. */
+  readonly proposalResultSummary?: string;
   /** The application delta is accepted but its control workflow has not settled yet. */
   readonly inFlight?: true;
   readonly operatorSteering?: readonly string[];
+  /** Later applications in the same authenticated source-correction lineage on shared targets. */
+  readonly laterSourceCorrections?: readonly Readonly<{
+    ticketId: string;
+    approvedApplicationSha256: Sha256Digest;
+    targetNodeIds: readonly string[];
+    summary: string;
+    /** Reviewed structured application selection; request/reason diagnostic text is excluded. */
+    selectionSummary?: string;
+    /** Selected proposal result only; request/reason diagnostic text is never value authority. */
+    proposalResultSummary?: string;
+  }>[];
+}
+
+function approvedChangeValueAuthoritySummaries(
+  authority: Pick<
+    ApprovedChangeObligationContext,
+    "summary" | "selectionSummary" | "proposalResultSummary"
+  >,
+): readonly string[] {
+  const selected = [authority.selectionSummary, authority.proposalResultSummary].flatMap(
+    (summary) => {
+      const normalized = summary?.trim();
+      return normalized === undefined || normalized.length === 0 ? [] : [normalized];
+    },
+  );
+  return selected.length === 0 ? [authority.summary] : [...new Set(selected)];
 }
 
 function proposalRequestPublicationForTicket(
@@ -7769,11 +7799,85 @@ function approvedApplicationObligationSummary(
 ): string | undefined {
   const request = approvedApplicationRequestContext(run, ticket);
   if (request === undefined) return undefined;
+  const proposalResult =
+    request.materialization.proposalTerminalProof.semanticResult.summary?.trim();
   return [
     `Approved request (${request.publication.requestSha256}): ${request.publication.summary}`,
     `Recorded reason: ${request.publication.reason}`,
     `Reviewed application selection: ${request.materialization.selectionSummary}`,
+    ...(proposalResult === undefined || proposalResult.length === 0
+      ? []
+      : [`Hash-bound proposal result: ${proposalResult}`]),
   ].join("\n");
+}
+
+function applicationForSourceProposal(
+  run: Pick<RunRecord, "tickets">,
+  sourceTicketId: string,
+  proposalTicketId: string,
+): Readonly<TicketRecord> | undefined {
+  const proposal = run.tickets[proposalTicketId];
+  const request = proposal?.executionControl?.proposalRequest;
+  const disposition = proposal?.executionControl?.proposalDisposition;
+  const applicationId =
+    disposition?.kind === "application" ? disposition.applicationTicketId : undefined;
+  const application = applicationId === undefined ? undefined : run.tickets[applicationId];
+  if (
+    proposal?.status !== "completed" ||
+    request?.sourceTicketId !== sourceTicketId ||
+    application === undefined ||
+    application.executionControl?.controlTicketAuthority?.role !== "approved_application" ||
+    application.executionControl?.sourceProposalTicketId !== proposalTicketId ||
+    application.executionControl.approvedApplicationSha256 !== disposition?.authoritySha256
+  ) {
+    return undefined;
+  }
+  return application;
+}
+
+/** Later source-correction applications may replace values only on their shared target nodes. */
+function laterSourceCorrectionApplications(
+  run: Pick<RunRecord, "tickets">,
+): ReadonlyMap<string, readonly Readonly<TicketRecord>[]> {
+  const laterByApplicationId = new Map<string, TicketRecord[]>();
+  for (const source of Object.values(run.tickets)) {
+    const lineage = (source.executionControl?.sourceCorrectionSeeds ?? []).flatMap((seed) => {
+      if (seed.route !== "approved_application") return [];
+      const proposal = run.tickets[seed.proposalTicketId];
+      if (proposal?.executionControl?.proposalRequest?.requestSha256 !== seed.requestSha256) {
+        return [];
+      }
+      const application = applicationForSourceProposal(run, source.id, seed.proposalTicketId);
+      return application?.status === "completed" ? [application] : [];
+    });
+    const hold = source.executionControl?.sourceHold;
+    if (hold !== undefined) {
+      const proposal = run.tickets[hold.proposalTicketId];
+      if (proposal?.executionControl?.proposalRequest?.requestSha256 === hold.requestSha256) {
+        const application = applicationForSourceProposal(run, source.id, hold.proposalTicketId);
+        if (
+          application !== undefined &&
+          application.status !== "proposed" &&
+          application.status !== "cancelled" &&
+          !lineage.some((candidate) => candidate.id === application.id)
+        ) {
+          lineage.push(application);
+        }
+      }
+    }
+    for (let index = 0; index < lineage.length; index += 1) {
+      const application = lineage[index]!;
+      const targets = new Set(application.targetNodeIds);
+      for (let laterIndex = index + 1; laterIndex < lineage.length; laterIndex += 1) {
+        const later = lineage[laterIndex]!;
+        if (!later.targetNodeIds.some((nodeId) => targets.has(nodeId))) continue;
+        const successors = laterByApplicationId.get(application.id) ?? [];
+        if (!successors.some((candidate) => candidate.id === later.id)) successors.push(later);
+        laterByApplicationId.set(application.id, successors);
+      }
+    }
+  }
+  return laterByApplicationId;
 }
 
 /** Preserve an approved semantic obligation after its control ticket has settled. */
@@ -7782,7 +7886,8 @@ export function approvedChangeObligationsForTargets(
   targetNodeIds: readonly string[],
 ): ApprovedChangeObligationContext[] {
   const targets = new Set(targetNodeIds);
-  return Object.values(run.tickets)
+  const laterByApplicationId = laterSourceCorrectionApplications(run);
+  const obligations = Object.values(run.tickets)
     .filter(
       (ticket) =>
         ticket.status === "completed" &&
@@ -7793,17 +7898,82 @@ export function approvedChangeObligationsForTargets(
     .sort((left, right) => compareText(left.id, right.id))
     .flatMap((ticket) => {
       const summary = approvedApplicationObligationSummary(run, ticket) ?? ticket.summary.trim();
-      return summary.length === 0
-        ? []
-        : [
-            {
-              ticketId: ticket.id,
-              approvedApplicationSha256: ticket.executionControl!.approvedApplicationSha256!,
-              targetNodeIds: [...ticket.targetNodeIds],
-              summary,
-            },
-          ];
+      if (summary.length === 0) return [];
+      const proposalResultSummary = approvedApplicationRequestContext(
+        run,
+        ticket,
+      )?.materialization.proposalTerminalProof.semanticResult.summary?.trim();
+      const selectionSummary = approvedApplicationRequestContext(
+        run,
+        ticket,
+      )?.materialization.selectionSummary.trim();
+      const laterSourceCorrections = (laterByApplicationId.get(ticket.id) ?? []).flatMap(
+        (later) => {
+          const laterSummary =
+            approvedApplicationObligationSummary(run, later) ?? later.summary.trim();
+          const proposalResultSummary = approvedApplicationRequestContext(
+            run,
+            later,
+          )?.materialization.proposalTerminalProof.semanticResult.summary?.trim();
+          const selectionSummary = approvedApplicationRequestContext(
+            run,
+            later,
+          )?.materialization.selectionSummary.trim();
+          const authoritySha256 = later.executionControl?.approvedApplicationSha256;
+          return authoritySha256 === undefined || laterSummary.length === 0
+            ? []
+            : [
+                {
+                  ticketId: later.id,
+                  approvedApplicationSha256: authoritySha256,
+                  targetNodeIds: [...later.targetNodeIds],
+                  summary: laterSummary,
+                  ...(selectionSummary === undefined || selectionSummary.length === 0
+                    ? {}
+                    : { selectionSummary }),
+                  ...(proposalResultSummary === undefined || proposalResultSummary.length === 0
+                    ? {}
+                    : { proposalResultSummary }),
+                },
+              ];
+        },
+      );
+      return [
+        {
+          ticketId: ticket.id,
+          approvedApplicationSha256: ticket.executionControl!.approvedApplicationSha256!,
+          targetNodeIds: [...ticket.targetNodeIds],
+          summary,
+          ...(selectionSummary === undefined || selectionSummary.length === 0
+            ? {}
+            : { selectionSummary }),
+          ...(proposalResultSummary === undefined || proposalResultSummary.length === 0
+            ? {}
+            : { proposalResultSummary }),
+          ...(laterSourceCorrections.length === 0 ? {} : { laterSourceCorrections }),
+        },
+      ];
     });
+  const remaining = new Map(obligations.map((obligation) => [obligation.ticketId, obligation]));
+  const ordered: ApprovedChangeObligationContext[] = [];
+  while (remaining.size > 0) {
+    const ready = [...remaining.values()]
+      .filter(
+        (candidate) =>
+          ![...remaining.values()].some((predecessor) =>
+            predecessor.laterSourceCorrections?.some(
+              (later) => later.ticketId === candidate.ticketId,
+            ),
+          ),
+      )
+      .sort((left, right) => compareText(left.ticketId, right.ticketId));
+    const next =
+      ready[0] ??
+      [...remaining.values()].sort((left, right) => compareText(left.ticketId, right.ticketId))[0]!;
+    ordered.push(next);
+    remaining.delete(next.ticketId);
+  }
+  return ordered;
 }
 
 /** Control proposals authorize later work; they do not themselves inherit settled application work. */
@@ -7871,6 +8041,19 @@ export function approvedChangeObligationInstructions(
       ...(reviewBoundary === undefined
         ? [
             "The compiler is currently applying this exact approved request through the source-owning workflow. Treat its complete request and operator steering as binding input for the files and authored contract in this attempt; do not substitute repository neighbors, invent gate identities, or wait for the application control ticket to settle.",
+          ]
+        : [reviewBoundary]),
+    ];
+  }
+  if ((obligation.laterSourceCorrections?.length ?? 0) > 0) {
+    const later = obligation.laterSourceCorrections!;
+    return [
+      `Historical approved-change evidence ${obligation.approvedApplicationSha256} from ${obligation.ticketId}: ${obligation.summary}`,
+      `Later compiler-authenticated source-correction applications on shared targets: ${later.map((correction) => `${correction.approvedApplicationSha256} from ${correction.ticketId}`).join(", ")}.`,
+      "This historical obligation remains binding evidence, but do not treat an older exact value as current when the later correction directly replaces it on the same semantic field and target. Preserve every unaffected target, mechanism, relationship, input role, and outcome. A later target overlap alone does not erase this evidence.",
+      ...(reviewBoundary === undefined
+        ? [
+            "Apply the newest explicit value for each directly replaced field. If the later correction does not explicitly replace a historical value, preserve that historical value or raise the smallest exact authority conflict; do not silently discard it.",
           ]
         : [reviewBoundary]),
     ];
@@ -8073,41 +8256,67 @@ export function assertApprovedChangeRuntimeObligations(
   writableNodeIds: readonly string[],
 ): void {
   const writable = new Set(writableNodeIds);
-  for (const obligation of approvedChangeObligationsForTargets(run, writableNodeIds)) {
-    const gateVerifierPaths = new Set<string>();
-    const entrypoints = obligation.targetNodeIds.flatMap((nodeId) => {
-      const node = graph.node(nodeId);
-      if (node?.type !== "asset") return [];
-      const implementation = optionalRecord(node.spec.implementation);
-      const assetEntrypoints = stringArray(
-        implementation?.entrypoints,
-        `asset ${nodeId} implementation entrypoints`,
-      );
-      const gateContracts = optionalRecord(node.spec.gate_contracts);
-      for (const contractValue of Object.values(gateContracts ?? {})) {
-        const contract = optionalRecord(contractValue);
-        if (!Array.isArray(contract?.argv)) continue;
-        for (const argument of contract.argv) {
-          if (typeof argument === "string" && assetEntrypoints.includes(argument)) {
-            gateVerifierPaths.add(argument);
-          }
-        }
-      }
-      return assetEntrypoints;
-    });
+  const obligations = approvedChangeObligationsForTargets(run, writableNodeIds);
+  for (const obligation of obligations) {
     const commandPattern = /([A-Za-z0-9][A-Za-z0-9._:-]*)\s*\(command=\[([^\]]*)\]\)/gu;
-    for (const match of obligation.summary.matchAll(commandPattern)) {
+    const commandMatches = approvedChangeValueAuthoritySummaries(obligation).flatMap((summary) => [
+      ...summary.matchAll(commandPattern),
+    ]);
+    for (const match of commandMatches) {
       const nodeId = match[1]!;
-      if (!writable.has(nodeId)) continue;
+      if (!writable.has(nodeId) || !obligation.targetNodeIds.includes(nodeId)) continue;
       const node = graph.node(nodeId);
       if (node?.type !== "run") continue;
-      const rawArgv = [...match[2]!.matchAll(/'([^']*)'|"([^"]*)"/gu)].map(
+      let effectiveAuthority: Pick<
+        ApprovedChangeObligationContext,
+        "ticketId" | "targetNodeIds" | "summary" | "selectionSummary" | "proposalResultSummary"
+      > = obligation;
+      let effectiveMatch = match;
+      const sameNodeCorrections = (obligation.laterSourceCorrections ?? []).filter((correction) =>
+        correction.targetNodeIds.includes(nodeId),
+      );
+      for (const correction of sameNodeCorrections) {
+        const replacements = approvedChangeValueAuthoritySummaries(correction)
+          .flatMap((summary) => [...summary.matchAll(commandPattern)])
+          .filter((candidate) => candidate[1] === nodeId);
+        const uniqueReplacements = [
+          ...new Map(replacements.map((candidate) => [candidate[2]!, candidate])).values(),
+        ];
+        if (uniqueReplacements.length === 1) {
+          effectiveAuthority = correction;
+          effectiveMatch = uniqueReplacements[0]!;
+        }
+      }
+      const entrypointAuthorityTargetIds = [
+        ...new Set([
+          ...obligation.targetNodeIds,
+          ...sameNodeCorrections.flatMap((correction) => correction.targetNodeIds),
+          ...obligations.flatMap((candidate) =>
+            candidate.targetNodeIds.includes(nodeId) &&
+            candidate.laterSourceCorrections?.some(
+              (correction) => correction.ticketId === obligation.ticketId,
+            )
+              ? candidate.targetNodeIds
+              : [],
+          ),
+        ]),
+      ];
+      const entrypoints = entrypointAuthorityTargetIds.flatMap((targetNodeId) => {
+        const target = graph.node(targetNodeId);
+        if (target?.type !== "asset") return [];
+        const implementation = optionalRecord(target.spec.implementation);
+        return stringArray(
+          implementation?.entrypoints,
+          `asset ${targetNodeId} implementation entrypoints`,
+        );
+      });
+      const rawArgv = [...effectiveMatch[2]!.matchAll(/'([^']*)'|"([^"]*)"/gu)].map(
         (token) => token[1] ?? token[2]!,
       );
       if (rawArgv.length === 0) {
         fail(
           "approved_change_obligation",
-          `approved change ${obligation.ticketId} carries an unreadable command for ${nodeId}`,
+          `approved change ${effectiveAuthority.ticketId} carries an unreadable command for ${nodeId}`,
         );
       }
       const expectedArgv = rawArgv.map((argument) => {
@@ -8119,7 +8328,7 @@ export function assertApprovedChangeRuntimeObligations(
         if (candidates.length !== 1) {
           fail(
             "approved_change_obligation",
-            `approved change ${obligation.ticketId} cannot resolve ${argument} to one target asset entrypoint`,
+            `approved change ${effectiveAuthority.ticketId} cannot resolve ${argument} to one target asset entrypoint`,
           );
         }
         return candidates[0]!;
@@ -8132,7 +8341,7 @@ export function assertApprovedChangeRuntimeObligations(
       ) {
         fail(
           "approved_change_obligation",
-          `run ${nodeId} must carry one nonempty argv for approved change ${obligation.ticketId}`,
+          `run ${nodeId} must carry one nonempty argv for approved change ${effectiveAuthority.ticketId}`,
         );
       }
       const actualArgv = command as string[];
@@ -8142,7 +8351,7 @@ export function assertApprovedChangeRuntimeObligations(
       ) {
         fail(
           "approved_change_obligation",
-          `run ${nodeId} must retain approved command ${JSON.stringify(expectedArgv)} from ${obligation.ticketId}; received ${JSON.stringify(actualArgv)}`,
+          `run ${nodeId} must retain approved command ${JSON.stringify(expectedArgv)} from ${effectiveAuthority.ticketId}; received ${JSON.stringify(actualArgv)}`,
         );
       }
       const scientificInputs = Array.isArray(contract?.scientific_inputs)
@@ -8157,14 +8366,75 @@ export function assertApprovedChangeRuntimeObligations(
         if (scientificInputPaths.has(argument)) continue;
         fail(
           "approved_change_obligation",
-          `run ${nodeId} approved command path ${argument} must remain a scientific input under ${obligation.ticketId}`,
+          `run ${nodeId} approved command path ${argument} must remain a scientific input under ${effectiveAuthority.ticketId}`,
         );
       }
-      if (/no change to [^.]*scientific_inputs roles/iu.test(obligation.summary)) {
-        const protocolAdapterRequired = /protocol adapter/iu.test(obligation.summary);
+      const roleAuthorities = [
+        {
+          ticketId: obligation.ticketId,
+          targetNodeIds: obligation.targetNodeIds,
+          summary: approvedChangeValueAuthoritySummaries(obligation).join("\n"),
+        },
+        ...(obligation.laterSourceCorrections ?? []).map((correction) => ({
+          ticketId: correction.ticketId,
+          targetNodeIds: correction.targetNodeIds,
+          summary: approvedChangeValueAuthoritySummaries(correction).join("\n"),
+        })),
+      ].filter((authority) => authority.targetNodeIds.includes(nodeId));
+      for (const roleAuthority of roleAuthorities) {
+        if (!/no change to [^.]*scientific_inputs roles/iu.test(roleAuthority.summary)) continue;
+        const roleClaims = [
+          ...roleAuthority.summary.matchAll(
+            /([A-Za-z0-9][A-Za-z0-9._:-]*)\s*\(command=\[([^\]]*)\]\)/gu,
+          ),
+        ].filter((candidate) => candidate[1] === nodeId);
+        if (roleClaims.length === 0) continue;
+        const roleGateVerifierPaths = new Set<string>();
+        const roleEntrypoints = roleAuthority.targetNodeIds.flatMap((targetNodeId) => {
+          const target = graph.node(targetNodeId);
+          if (target?.type !== "asset") return [];
+          const implementation = optionalRecord(target.spec.implementation);
+          const assetEntrypoints = stringArray(
+            implementation?.entrypoints,
+            `asset ${targetNodeId} implementation entrypoints`,
+          );
+          const gateContracts = optionalRecord(target.spec.gate_contracts);
+          for (const contractValue of Object.values(gateContracts ?? {})) {
+            const gateContract = optionalRecord(contractValue);
+            if (!Array.isArray(gateContract?.argv)) continue;
+            for (const argument of gateContract.argv) {
+              if (typeof argument === "string" && assetEntrypoints.includes(argument)) {
+                roleGateVerifierPaths.add(argument);
+              }
+            }
+          }
+          return assetEntrypoints;
+        });
+        const roleArguments = new Set(
+          roleClaims.flatMap((claim) =>
+            [...claim[2]!.matchAll(/'([^']*)'|"([^"]*)"/gu)].map((token) => {
+              const argument = token[1] ?? token[2]!;
+              if (!argument.startsWith(".../")) return argument;
+              const suffix = argument.slice(3);
+              const candidates = [
+                ...new Set(roleEntrypoints.filter((entrypoint) => entrypoint.endsWith(suffix))),
+              ];
+              if (candidates.length !== 1) {
+                fail(
+                  "approved_change_obligation",
+                  `approved change ${roleAuthority.ticketId} cannot resolve ${argument} to one target asset entrypoint`,
+                );
+              }
+              return candidates[0]!;
+            }),
+          ),
+        );
+        const protocolAdapterRequired = /protocol adapter/iu.test(roleAuthority.summary);
         for (const argument of expectedArgv.slice(1)) {
-          if (!argument.includes("/") || argument.startsWith("-")) continue;
-          const requiredRole = gateVerifierPaths.has(argument)
+          if (!argument.includes("/") || argument.startsWith("-") || !roleArguments.has(argument)) {
+            continue;
+          }
+          const requiredRole = roleGateVerifierPaths.has(argument)
             ? "verifier_contract"
             : protocolAdapterRequired
               ? "protocol_adapter"
@@ -8174,7 +8444,7 @@ export function assertApprovedChangeRuntimeObligations(
           if (input?.role === requiredRole) continue;
           fail(
             "approved_change_obligation",
-            `run ${nodeId} scientific input role for ${argument} must remain ${requiredRole} under ${obligation.ticketId}`,
+            `run ${nodeId} scientific input role for ${argument} must remain ${requiredRole} under ${roleAuthority.ticketId}`,
           );
         }
       }
@@ -8764,6 +9034,9 @@ function ticketAttempt(
             ...proposalAuditSteering,
             ...proposalAttemptInstructions,
           ]),
+      ...approvedChangeObligations.flatMap((obligation) =>
+        approvedChangeObligationInstructions(obligation, step.kind),
+      ),
       ...(approvedApplicationProposal === undefined
         ? []
         : [
@@ -8772,6 +9045,7 @@ function ticketAttempt(
               ? []
               : [
                   `Exact approved application selection (${approvedApplicationMaterialization.authoritySha256}): ${approvedApplicationMaterialization.selectionSummary}`,
+                  `Hash-bound proposal result: ${approvedApplicationMaterialization.proposalTerminalProof.semanticResult.summary}`,
                   "The exact approved application selection is already the authoritative resolution among the source request's alternatives. Do not ask the operator to choose those alternatives again. Compatible later audit steering clarifies this selection but does not replace it. If later steering materially conflicts with or would replace the exact selection, do not silently choose either authority: route one focused question or a new change-control decision for that conflict. Otherwise ask only if current compiler-authenticated state creates a materially different high-impact choice that the selection and compatible steering do not resolve.",
                 ]),
             ...applicationAuditSteering,
@@ -8783,7 +9057,7 @@ function ticketAttempt(
             ...(applicationGraphOnlyReviewInstruction === undefined
               ? []
               : [applicationGraphOnlyReviewInstruction]),
-            "The approved request together with its cumulative operator steering is the complete obligation for this application. Historical durable obligations are additive constraints: they may preserve earlier accepted state, but they never narrow, replace, or excuse any target or outcome that remains required after those operator clarifications. Review and apply that clarified request in full.",
+            "The approved request together with its cumulative operator steering is the complete obligation for this application. Within the same compiler-authenticated source-correction lineage, a newer explicit value replaces a directly incompatible historical value only for that same semantic field and target. Every unaffected target, mechanism, relationship, input role, and outcome remains binding, as do independent historical approvals. Review and apply that clarified request in full.",
             ...(step.kind === "review"
               ? [
                   "Review the predecessor candidate against the exact approved selection and compatible cumulative steering. This review is read-only: return only the configured verdict, and do not apply or demand a new graph mutation from this step.",
@@ -8802,9 +9076,6 @@ function ticketAttempt(
                   "An approved request can explicitly authorize a bounded new node even though that node has no preexisting id to list in the application graph write-authority nodes. When the request requires one, create it only within this operation's allowed new-node types and count; unapproved-new-node-creation forbids only a new node that the approved request does not require.",
                 ]),
           ]),
-      ...approvedChangeObligations.flatMap((obligation) =>
-        approvedChangeObligationInstructions(obligation, step.kind),
-      ),
       ...(gateRepairPrompt === undefined ? [] : [gateRepairPrompt]),
       ...(standaloneSupportRunAssetRepairPrompt === undefined
         ? []

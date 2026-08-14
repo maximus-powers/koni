@@ -142,6 +142,7 @@ import {
   type AgentAttemptRecord,
   type RunQuestionRecord,
   type RunRecord,
+  type SourceCorrectionSeedAuthority,
   type TicketRecord,
   type TerminalFailureSettlementProof,
   type TerminalSuccessSettlementProof,
@@ -3637,6 +3638,351 @@ describe("native compiler-authoritative run program", () => {
       },
     ]);
     expect(approvedChangeObligationsForTargets(run, ["unrelated"])).toEqual([]);
+  });
+
+  it("supersedes only applications in the authenticated source-correction lineage", () => {
+    const oldCommand =
+      "run-audit(command=['node','old/adapter.js','shared/verify.js']) must retain the first reviewed invocation and the runpy implementation mechanism. No change to the scientific_inputs roles; preserve the protocol adapter.";
+    const supportCommand =
+      "run-support(command=['node','support-runner']) must retain the independent support invocation.";
+    const run = {
+      tickets: {
+        "TK-source": {
+          id: "TK-source",
+          status: "blocked",
+          targetNodeIds: ["run-audit", "run-support"],
+          executionControl: {
+            sourceHold: {
+              proposalTicketId: "TK-proposal-current",
+              requestSha256: digest("request-current"),
+            },
+            sourceCorrectionSeeds: [
+              {
+                route: "approved_application",
+                proposalTicketId: "TK-proposal-old",
+                requestSha256: digest("request-old"),
+              },
+            ],
+          },
+        },
+        "TK-proposal-old": {
+          id: "TK-proposal-old",
+          status: "completed",
+          targetNodeIds: ["asset-old", "run-audit", "run-legacy"],
+          executionControl: {
+            proposalRequest: {
+              sourceTicketId: "TK-source",
+              requestSha256: digest("request-old"),
+            },
+            proposalDisposition: {
+              kind: "application",
+              authoritySha256: digest("application-old"),
+              applicationTicketId: "TK-application-old",
+            },
+          },
+        },
+        "TK-application-old": {
+          id: "TK-application-old",
+          status: "completed",
+          summary: oldCommand,
+          targetNodeIds: ["asset-old", "run-audit", "run-legacy"],
+          executionControl: {
+            sourceProposalTicketId: "TK-proposal-old",
+            approvedApplicationSha256: digest("application-old"),
+            controlTicketAuthority: { role: "approved_application" },
+          },
+        },
+        "TK-proposal-current": {
+          id: "TK-proposal-current",
+          status: "completed",
+          targetNodeIds: ["run-audit", "run-support"],
+          executionControl: {
+            proposalRequest: {
+              sourceTicketId: "TK-source",
+              sourceStepId: "apply",
+              sourceOutputSha256: digest("source-output-current"),
+              requestSha256: digest("request-current"),
+            },
+            proposalDisposition: {
+              kind: "application",
+              authoritySha256: digest("application-current"),
+              applicationTicketId: "TK-application-current",
+            },
+            controlTicketAuthority: {
+              role: "proposal",
+              ticketId: "TK-proposal-current",
+              causal: {
+                role: "proposal",
+                publication: {
+                  proposalTicketId: "TK-proposal-current",
+                  requestSha256: digest("request-current"),
+                  sourceTicketId: "TK-source",
+                  sourceStepId: "apply",
+                  sourceOutputSha256: digest("source-output-current"),
+                  summary:
+                    "Replace the observed bad run-audit(command=['node','diagnostic-runner']) invocation.",
+                  reason: "The configured proof rejected the observed diagnostic command.",
+                },
+              },
+            },
+          },
+        },
+        "TK-application-current": {
+          id: "TK-application-current",
+          status: "blocked",
+          summary:
+            "Replace only the reviewed run-audit command while retaining every unaffected mechanism.",
+          targetNodeIds: ["run-audit", "run-support"],
+          executionControl: {
+            sourceProposalTicketId: "TK-proposal-current",
+            approvedApplicationSha256: digest("application-current"),
+            controlTicketAuthority: {
+              role: "approved_application",
+              causal: {
+                role: "approved_application",
+                materialization: {
+                  kind: "application",
+                  proposalTicketId: "TK-proposal-current",
+                  applicationTicketId: "TK-application-current",
+                  requestSha256: digest("request-current"),
+                  authoritySha256: digest("application-current"),
+                  selectionSummary:
+                    "Apply run-audit(command=['node','new-runner','.../verify.js']) only.",
+                  proposalTerminalProof: {
+                    semanticResult: {
+                      summary:
+                        "Selected the reviewed command and preserved every unaffected mechanism.",
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        "TK-application-independent": {
+          id: "TK-application-independent",
+          status: "completed",
+          summary: supportCommand,
+          targetNodeIds: ["run-support"],
+          executionControl: {
+            sourceProposalTicketId: "TK-proposal-independent",
+            approvedApplicationSha256: digest("application-independent"),
+            controlTicketAuthority: { role: "approved_application" },
+          },
+        },
+      },
+    } as unknown as RunRecord;
+
+    const obligations = approvedChangeObligationsForAttempt(
+      run,
+      ["run-audit", "run-support"],
+      "application",
+    );
+    expect(obligations.map((obligation) => obligation.ticketId)).toEqual([
+      "TK-application-independent",
+      "TK-application-old",
+    ]);
+    expect(obligations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          ticketId: "TK-application-old",
+          summary: oldCommand,
+          laterSourceCorrections: [expect.objectContaining({ ticketId: "TK-application-current" })],
+        }),
+      ]),
+    );
+    expect(obligations.map((obligation) => obligation.summary)).toContain(oldCommand);
+    expect(obligations.map((obligation) => obligation.summary)).toContain(supportCommand);
+    const historical = obligations.find(
+      (obligation) => obligation.ticketId === "TK-application-old",
+    )!;
+    const historicalInstructions = approvedChangeObligationInstructions(historical).join("\n");
+    expect(historicalInstructions).toContain("runpy implementation mechanism");
+    expect(historicalInstructions).toContain(
+      "do not treat an older exact value as current when the later correction directly replaces it",
+    );
+    expect(historicalInstructions).not.toContain(
+      "Preserve its exact algorithms, argv shape, and bounded target semantics",
+    );
+
+    const auditContract = {
+      command: ["node", "new-runner", "shared/verify.js"],
+      scientific_inputs: [{ path: "shared/verify.js", role: "verifier_contract" }],
+    };
+    const supportContract = { command: ["node", "support-runner"] };
+    const graph = {
+      node: (id: string) => {
+        if (id === "run-audit") {
+          return {
+            id,
+            type: "run",
+            spec: { runtime_contract: auditContract },
+          } as unknown as GraphNode;
+        }
+        if (id === "run-support") {
+          return {
+            id,
+            type: "run",
+            spec: { runtime_contract: supportContract },
+          } as unknown as GraphNode;
+        }
+        if (id === "run-foreign") {
+          return {
+            id,
+            type: "run",
+            spec: { runtime_contract: { command: ["node", "wrong-foreign"] } },
+          } as unknown as GraphNode;
+        }
+        if (id === "asset-old") {
+          return {
+            id,
+            type: "asset",
+            spec: {
+              implementation: { entrypoints: ["old/adapter.js", "shared/verify.js"] },
+              gate_contracts: {
+                verification: { argv: ["node", "shared/verify.js"] },
+              },
+            },
+          } as unknown as GraphNode;
+        }
+        if (id === "asset-unrelated") {
+          return {
+            id,
+            type: "asset",
+            spec: { implementation: { entrypoints: ["unrelated/unrelated.js"] } },
+          } as unknown as GraphNode;
+        }
+        return undefined;
+      },
+    };
+    expect(() =>
+      assertApprovedChangeRuntimeObligations(run, graph, ["run-audit", "run-support"]),
+    ).not.toThrow();
+    const unauthorizedPath = structuredClone(run);
+    const unauthorizedCausal =
+      unauthorizedPath.tickets["TK-application-current"]!.executionControl!.controlTicketAuthority!
+        .causal;
+    if (unauthorizedCausal?.role !== "approved_application") {
+      throw new Error("expected approved application authority");
+    }
+    Object.assign(unauthorizedCausal.materialization, {
+      selectionSummary: "Apply run-audit(command=['node','new-runner','.../missing.js']) only.",
+    });
+    auditContract.command = ["node", "new-runner", "missing.js"];
+    expect(() =>
+      assertApprovedChangeRuntimeObligations(unauthorizedPath, graph, ["run-audit", "run-support"]),
+    ).toThrow(/cannot resolve \.\.\.\/missing\.js to one target asset entrypoint/);
+    auditContract.command = ["node", "new-runner", "shared/verify.js"];
+    supportContract.command = ["node", "wrong-support-runner"];
+    expect(() =>
+      assertApprovedChangeRuntimeObligations(run, graph, ["run-audit", "run-support"]),
+    ).toThrow(/run-support must retain approved command/);
+    supportContract.command = ["node", "support-runner"];
+
+    const cancelled = structuredClone(run);
+    cancelled.tickets["TK-application-current"]!.status = "cancelled";
+    expect(() =>
+      assertApprovedChangeRuntimeObligations(cancelled, graph, ["run-audit", "run-support"]),
+    ).toThrow(/run-audit must retain approved command.*old\/adapter\.js/u);
+
+    const nonoverlapping = structuredClone(run);
+    nonoverlapping.tickets["TK-application-current"]!.targetNodeIds = ["run-support"];
+    expect(() =>
+      assertApprovedChangeRuntimeObligations(nonoverlapping, graph, ["run-audit", "run-support"]),
+    ).toThrow(/run-audit must retain approved command.*old\/adapter\.js/u);
+
+    const released = structuredClone(run);
+    released.tickets["TK-application-current"]!.status = "completed";
+    delete released.tickets["TK-source"]!.executionControl!.sourceHold;
+    released.tickets["TK-source"]!.executionControl!.sourceCorrectionSeeds!.push({
+      route: "approved_application",
+      proposalTicketId: "TK-proposal-current",
+      requestSha256: digest("request-current"),
+    } as SourceCorrectionSeedAuthority);
+    expect(() =>
+      assertApprovedChangeRuntimeObligations(released, graph, ["run-audit", "run-support"]),
+    ).not.toThrow();
+    const outOfTarget = structuredClone(released);
+    const outOfTargetCausal =
+      outOfTarget.tickets["TK-application-current"]!.executionControl!.controlTicketAuthority!
+        .causal;
+    if (outOfTargetCausal?.role !== "approved_application") {
+      throw new Error("expected approved application authority");
+    }
+    Object.assign(outOfTargetCausal.materialization, {
+      selectionSummary:
+        "Apply run-audit(command=['node','new-runner','.../verify.js']); observed run-foreign(command=['node','foreign-runner']).",
+    });
+    expect(() =>
+      assertApprovedChangeRuntimeObligations(outOfTarget, graph, [
+        "run-audit",
+        "run-support",
+        "run-foreign",
+      ]),
+    ).not.toThrow();
+
+    const crossTarget = structuredClone(released);
+    crossTarget.tickets["TK-source"]!.executionControl!.sourceCorrectionSeeds!.splice(1, 0, {
+      route: "approved_application",
+      proposalTicketId: "TK-proposal-unrelated",
+      requestSha256: digest("request-unrelated"),
+    } as SourceCorrectionSeedAuthority);
+    crossTarget.tickets["TK-proposal-unrelated"] = {
+      id: "TK-proposal-unrelated",
+      status: "completed",
+      targetNodeIds: ["asset-unrelated", "run-support"],
+      executionControl: {
+        proposalRequest: {
+          sourceTicketId: "TK-source",
+          requestSha256: digest("request-unrelated"),
+        },
+        proposalDisposition: {
+          kind: "application",
+          authoritySha256: digest("application-unrelated"),
+          applicationTicketId: "TK-application-unrelated",
+        },
+      },
+    } as TicketRecord;
+    crossTarget.tickets["TK-application-unrelated"] = {
+      id: "TK-application-unrelated",
+      status: "completed",
+      summary: "Preserve the unrelated support asset.",
+      targetNodeIds: ["asset-unrelated", "run-support"],
+      executionControl: {
+        sourceProposalTicketId: "TK-proposal-unrelated",
+        approvedApplicationSha256: digest("application-unrelated"),
+        controlTicketAuthority: { role: "approved_application" },
+      },
+    } as TicketRecord;
+    const crossTargetCausal =
+      crossTarget.tickets["TK-application-current"]!.executionControl!.controlTicketAuthority!
+        .causal;
+    if (crossTargetCausal?.role !== "approved_application") {
+      throw new Error("expected approved application authority");
+    }
+    Object.assign(crossTargetCausal.materialization, {
+      selectionSummary: "Apply run-audit(command=['node','new-runner','.../unrelated.js']) only.",
+    });
+    auditContract.command = ["node", "new-runner", "unrelated/unrelated.js"];
+    auditContract.scientific_inputs = [
+      { path: "unrelated/unrelated.js", role: "verifier_contract" },
+    ];
+    expect(() =>
+      assertApprovedChangeRuntimeObligations(crossTarget, graph, ["run-audit", "run-support"]),
+    ).toThrow(/cannot resolve \.\.\.\/unrelated\.js to one target asset entrypoint/);
+    auditContract.command = ["node", "new-runner", "shared/verify.js"];
+    auditContract.scientific_inputs = [{ path: "shared/verify.js", role: "verifier_contract" }];
+    const releasedObligations = approvedChangeObligationsForTargets(released, [
+      "run-audit",
+      "run-support",
+    ]);
+    expect(
+      releasedObligations.findIndex((obligation) => obligation.ticketId === "TK-application-old"),
+    ).toBeLessThan(
+      releasedObligations.findIndex(
+        (obligation) => obligation.ticketId === "TK-application-current",
+      ),
+    );
   });
 
   it("rejects a stale run contract that contradicts a completed approved-change argv", () => {
@@ -9494,7 +9840,8 @@ describe("native compiler-authoritative run program", () => {
     );
     const applicationOutput = {
       status: "completed",
-      summary: "Selected the exact bounded semantic application",
+      summary:
+        "Selected the exact bounded semantic application: replace only spec.command with the repository-root runner argv.",
       changeApplication: {
         operation: "apply-change-request",
         targetNodeIds: [controlTarget],
@@ -9592,6 +9939,7 @@ describe("native compiler-authoritative run program", () => {
       attemptId: proposalPrepared.spec.identity.attemptId,
       actionInvocationId: "proposal-terminal-action",
       changeControlSha256: applicationSelection.changeControl.sha256,
+      summary: applicationOutput.summary,
     });
     const proposalReviewTerminalProof = fixtureTerminalSuccessProof({
       runId: run.id,
@@ -9793,6 +10141,9 @@ describe("native compiler-authoritative run program", () => {
         `Exact approved application selection (${applicationMaterialization.authoritySha256}): ${applicationMaterialization.selectionSummary}`,
       );
       expect(prepared.spec.persona.initialPrompt).toContain(
+        `Hash-bound proposal result: ${applicationOutput.summary}`,
+      );
+      expect(prepared.spec.persona.initialPrompt).toContain(
         "Compatible later audit steering clarifies this selection but does not replace it",
       );
       expect(prepared.spec.persona.initialPrompt).toContain(
@@ -9833,7 +10184,13 @@ describe("native compiler-authoritative run program", () => {
       "The approved request together with its cumulative operator steering is the complete obligation for this application",
     );
     expect(applicationPrepared.spec.persona.initialPrompt).toContain(
-      "Historical durable obligations are additive constraints",
+      "Every unaffected target, mechanism, relationship, input role, and outcome remains binding",
+    );
+    expect(applicationPrepared.spec.persona.initialPrompt).toContain(
+      "a newer explicit value replaces a directly incompatible historical value only for that same semantic field and target",
+    );
+    expect(applicationPrepared.spec.persona.initialPrompt).not.toContain(
+      "they never narrow, replace, or excuse any target or outcome",
     );
     expect(applicationPrepared.spec.persona.initialPrompt).toContain(
       `Application graph write-authority nodes: ${controlTarget}.`,
@@ -9890,6 +10247,7 @@ describe("native compiler-authoritative run program", () => {
     expect(completedObligation.summary).toContain(applicationReferencePath);
     expect(completedObligation.summary).toContain(upstreamOutput.upstreamChangeRequest.reason);
     expect(completedObligation.summary).toContain(applicationMaterialization.selectionSummary);
+    expect(completedObligation.summary).toContain(applicationOutput.summary);
     delete run.tickets[applicationTicket.id];
 
     const noOpOutput = {
@@ -11177,12 +11535,13 @@ function fixtureTerminalSuccessProof(
     attemptId: string;
     actionInvocationId: string;
     changeControlSha256?: Sha256Digest;
+    summary?: string;
   }>,
 ): TerminalSuccessSettlementProof {
   const semanticResult = {
     kind: "assignment" as const,
     status: "completed" as const,
-    summary: "Completed exact compiler-authorized work",
+    summary: input.summary ?? "Completed exact compiler-authorized work",
     ...(input.changeControlSha256 === undefined
       ? {}
       : { changeControlSha256: input.changeControlSha256 }),
