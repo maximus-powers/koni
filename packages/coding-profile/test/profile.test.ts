@@ -11,10 +11,10 @@ import registerProfile, {
 
 describe("coding profile registrar", () => {
   it("keeps the medium planning frontier while reserving correction headroom", async () => {
-    const source = await readFile(
-      path.resolve(import.meta.dirname, "../koni/baseline/run-types/medium.yaml"),
-      "utf8",
-    );
+    const [source, largeSource] = await Promise.all([
+      readFile(path.resolve(import.meta.dirname, "../koni/baseline/run-types/medium.yaml"), "utf8"),
+      readFile(path.resolve(import.meta.dirname, "../koni/baseline/run-types/large.yaml"), "utf8"),
+    ]);
     const document = YAML.parse(source) as {
       planning: {
         token_budget: {
@@ -29,11 +29,21 @@ describe("coding profile registrar", () => {
 
     expect(budget).toEqual({
       metric: "new_tokens",
-      limit: 210_000,
-      synthesis_reserve: 120_000,
+      limit: 350_000,
+      synthesis_reserve: 260_000,
       on_exhausted: "force_synthesis",
     });
     expect(budget.limit - budget.synthesis_reserve).toBe(90_000);
+    expect({
+      ticketAndVerification: budget.limit * 3,
+      leadAndIntegration: Math.floor(budget.limit / 2),
+    }).toEqual({ ticketAndVerification: 1_050_000, leadAndIntegration: 175_000 });
+    expect(YAML.parse(largeSource).planning.token_budget).toEqual({
+      metric: "new_tokens",
+      limit: 620_000,
+      synthesis_reserve: 260_000,
+      on_exhausted: "force_synthesis",
+    });
   });
 
   it("routes proof-spec defects through bounded native change control", async () => {

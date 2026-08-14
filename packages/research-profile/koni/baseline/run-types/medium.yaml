@@ -22,11 +22,12 @@ planning:
   token_budget:
     metric: new_tokens
     # The new-token metric includes uncached prompt and required-skill input, so
-    # retain a bounded 90k frontier for actual repository discovery before the
-    # separate correction reserve begins. Per-request model context admission
-    # remains independently enforced by Core.
-    limit: 210000
-    synthesis_reserve: 120000
+    # retain a bounded 90k frontier for actual repository discovery before a
+    # correction reserve sized for three full uncached Luna synthesis turns.
+    # Per-request model context admission remains independently enforced by
+    # Core.
+    limit: 350000
+    synthesis_reserve: 260000
     on_exhausted: force_synthesis
 profile:
   source: .koni/profile.yaml

@@ -11,10 +11,10 @@ import registerProfile, {
 
 describe("research profile registrar", () => {
   it("reserves a bounded Research Medium correction envelope after synthesis begins", async () => {
-    const source = await readFile(
-      path.resolve(import.meta.dirname, "../koni/baseline/run-types/medium.yaml"),
-      "utf8",
-    );
+    const [source, largeSource] = await Promise.all([
+      readFile(path.resolve(import.meta.dirname, "../koni/baseline/run-types/medium.yaml"), "utf8"),
+      readFile(path.resolve(import.meta.dirname, "../koni/baseline/run-types/large.yaml"), "utf8"),
+    ]);
     const document = YAML.parse(source) as {
       planning: {
         token_budget: {
@@ -28,11 +28,21 @@ describe("research profile registrar", () => {
 
     expect(tokenBudget).toEqual({
       metric: "new_tokens",
-      limit: 210_000,
-      synthesis_reserve: 120_000,
+      limit: 350_000,
+      synthesis_reserve: 260_000,
       on_exhausted: "force_synthesis",
     });
     expect(tokenBudget.limit - tokenBudget.synthesis_reserve).toBe(90_000);
+    expect({
+      ticketAndVerification: tokenBudget.limit * 3,
+      leadAndIntegration: Math.floor(tokenBudget.limit / 2),
+    }).toEqual({ ticketAndVerification: 1_050_000, leadAndIntegration: 175_000 });
+    expect(YAML.parse(largeSource).planning.token_budget).toEqual({
+      metric: "new_tokens",
+      limit: 1_060_000,
+      synthesis_reserve: 260_000,
+      on_exhausted: "force_synthesis",
+    });
   });
 
   it("keeps negative constraints on the operation, resource, or effect they regulate", async () => {
