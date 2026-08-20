@@ -132,6 +132,10 @@ function onFrame(frame) {
     )
       return;
     appendAssistant();
+    if (scenario === "provider_liveness_question_wait") {
+      requestQuestion();
+      return;
+    }
     if (
       (scenario === "failed_provider" ||
         scenario === "failed_provider_tool_call" ||
@@ -218,6 +222,20 @@ function onFrame(frame) {
       // Give the parent time to commit, then lose the response and process outcome projection.
       setTimeout(() => finish(23), 75);
     }
+    return;
+  }
+  if (frame.requestId === "question" && scenario === "provider_liveness_question_wait") {
+    if (!frame.ok || frame.value?.outcome !== "accepted") process.exit(105);
+    // The resumed provider still needs a meaningful portion of its liveness interval to process
+    // the answer before settling the already-admitted request.
+    setTimeout(requestSettlement, 250);
+    return;
+  }
+  if (frame.requestId === "settle" && scenario === "provider_liveness_question_wait") {
+    if (!frame.ok || frame.value?.protocol !== "koni.provider-request-settlement.v1")
+      process.exit(106);
+    // Keep the process attached so the test can inspect the settled request without introducing
+    // an unrelated terminal-output contract into this liveness regression.
     return;
   }
   if (
@@ -508,28 +526,37 @@ function appendAssistant() {
       ? [{ type: "text", text: "x".repeat(1_100_000) }]
       : scenario === "context_window_headroom"
         ? [{ type: "text", text: "Inspecting the already-injected compiler context." }]
-        : scenario === "synthesis_threshold"
-          ? [{ type: "text", text: "Continue repository exploration." }]
-          : failed || scenario === "pause" || scenario === "delete"
-            ? failed
-              ? scenario === "failed_provider_tool_call"
-                ? [
+        : scenario === "provider_liveness_question_wait"
+          ? [
+              {
+                type: "toolCall",
+                id: "question-call",
+                name: "koni_ask_question",
+                arguments: {
+                  prompt: "Which safe correction should continue?",
+                  options: [
                     {
-                      type: "thinking",
-                      thinking: "partial provider reasoning before a terminal error",
+                      id: "recommended",
+                      label: "Recommended correction",
+                      description: "Continue with the compiler-supported bounded correction.",
                     },
                     {
-                      type: "toolCall",
-                      id: "unaccepted-write-call",
-                      name: "koni_write_file",
-                      arguments: {
-                        path: "never-written.txt",
-                        expectedSha256: null,
-                        content: "must not execute",
-                      },
+                      id: "alternate",
+                      label: "Alternate correction",
+                      description: "Use the other materially different safe correction.",
                     },
-                  ]
-                : scenario === "failed_provider_terminal_tool_call"
+                  ],
+                  allowsNotes: true,
+                  recommendedOptionId: "recommended",
+                  impact: "high_impact",
+                },
+              },
+            ]
+          : scenario === "synthesis_threshold"
+            ? [{ type: "text", text: "Continue repository exploration." }]
+            : failed || scenario === "pause" || scenario === "delete"
+              ? failed
+                ? scenario === "failed_provider_tool_call"
                   ? [
                       {
                         type: "thinking",
@@ -537,12 +564,16 @@ function appendAssistant() {
                       },
                       {
                         type: "toolCall",
-                        id: "unaccepted-terminal-call",
-                        name: launch.spec.terminal.toolName,
-                        arguments: { result: "provider-plan" },
+                        id: "unaccepted-write-call",
+                        name: "koni_write_file",
+                        arguments: {
+                          path: "never-written.txt",
+                          expectedSha256: null,
+                          content: "must not execute",
+                        },
                       },
                     ]
-                  : scenario === "rate_limit_provider_error_with_pending_check"
+                  : scenario === "failed_provider_terminal_tool_call"
                     ? [
                         {
                           type: "thinking",
@@ -550,26 +581,39 @@ function appendAssistant() {
                         },
                         {
                           type: "toolCall",
-                          id: "unaccepted-check-call",
-                          name: "koni_run_check",
-                          arguments: { checkId: "fixture-check" },
+                          id: "unaccepted-terminal-call",
+                          name: launch.spec.terminal.toolName,
+                          arguments: { result: "provider-plan" },
                         },
                       ]
-                    : [
-                        {
-                          type: "thinking",
-                          thinking: "partial provider reasoning before a terminal error",
-                        },
-                      ]
-              : [{ type: "text", text: "provider response" }]
-            : [
-                {
-                  type: "toolCall",
-                  id: terminalCallId(),
-                  name: launch.spec.terminal.toolName,
-                  arguments: { result: "provider-plan" },
-                },
-              ];
+                    : scenario === "rate_limit_provider_error_with_pending_check"
+                      ? [
+                          {
+                            type: "thinking",
+                            thinking: "partial provider reasoning before a terminal error",
+                          },
+                          {
+                            type: "toolCall",
+                            id: "unaccepted-check-call",
+                            name: "koni_run_check",
+                            arguments: { checkId: "fixture-check" },
+                          },
+                        ]
+                      : [
+                          {
+                            type: "thinking",
+                            thinking: "partial provider reasoning before a terminal error",
+                          },
+                        ]
+                : [{ type: "text", text: "provider response" }]
+              : [
+                  {
+                    type: "toolCall",
+                    id: terminalCallId(),
+                    name: launch.spec.terminal.toolName,
+                    arguments: { result: "provider-plan" },
+                  },
+                ];
   assistantEntry = {
     type: "message",
     id:
@@ -784,6 +828,21 @@ function requestTerminal() {
       callId: terminalCallId(),
       name: launch.spec.terminal.toolName,
       arguments: { result: "provider-plan" },
+    },
+  });
+}
+
+function requestQuestion() {
+  const call = assistantEntry.message.content[0];
+  send({
+    type: "authority_request",
+    requestId: "question",
+    activationToken,
+    request: {
+      operation: "invoke_tool",
+      callId: call.id,
+      name: call.name,
+      arguments: call.arguments,
     },
   });
 }

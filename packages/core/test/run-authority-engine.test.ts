@@ -736,6 +736,45 @@ describe("run authority engine", () => {
     expect(run).toEqual(before);
   });
 
+  it("reissues a settled ticket attempt aborted by the provider liveness watchdog", () => {
+    const failed = {
+      id: "attempt-provider-liveness-timeout",
+      ticketId: "ticket-one",
+      stepId: "implement",
+      ticketExecutionEpoch: 0,
+      status: "aborted",
+      error:
+        "Provider request exceeded the 600000ms liveness boundary; aborting its contained Pi session",
+    } as AgentAttemptRecord;
+    const ticket = {
+      id: failed.ticketId,
+      title: "Execute work",
+      status: "blocked",
+      blocker: failed.error,
+      executionEpoch: 0,
+      steps: [
+        {
+          id: failed.stepId,
+          kind: "production",
+          status: "failed",
+          attemptIds: [failed.id],
+        },
+      ],
+    } as unknown as TicketRecord;
+    const run = {
+      tickets: { [ticket.id]: ticket },
+      attempts: { [failed.id]: failed },
+      git: { ticketCycles: {} },
+    } as unknown as RunRecord;
+
+    expect(
+      resetRetryableInfrastructureAssignment(run, ticket.id, "2026-08-14T23:30:00.000Z"),
+    ).toEqual({ ticketId: ticket.id, ticketTitle: ticket.title });
+    expect(ticket.status).toBe("queued");
+    expect(ticket.blocker).toBeUndefined();
+    expect(ticket.steps[0]?.status).toBe("pending");
+  });
+
   it("counts an exact recovery marker before a successor exists and blocks a second spend in the same epoch", () => {
     const recoveryMaterial = {
       protocol: "koni.agent-token-budget-recovery.v1" as const,

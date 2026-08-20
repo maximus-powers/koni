@@ -1514,6 +1514,65 @@ describe("run authority provider reservation lifecycle", () => {
     ).toBe(true);
   }, 60_000);
 
+  it("restarts provider liveness after an operator question is resolved", async () => {
+    const harness = await authorityHarness("provider_liveness_question_wait", {
+      providerRequestLivenessTimeoutMs: 500,
+    });
+    const runId = await createRun(harness.client);
+
+    await waitFor(async () => {
+      const run = await harness.engine.store.getRun(runId);
+      return (
+        run.lifecycle.phase === "awaiting_questions" &&
+        onlyAttempt(run).status === "waiting_question"
+      );
+    });
+    const opened = await harness.engine.store.getRun(runId);
+    const batch = Object.values(opened.questionBatches ?? {})[0]!;
+    const question = Object.values(opened.questions)[0]!;
+    const reservedAt = Date.parse(onlyAttempt(opened).authorityProviderRequests![0]!.reservedAt);
+    const resolveNearNextWatchdogAt = reservedAt + 950;
+    await new Promise<void>((resolve) =>
+      setTimeout(resolve, Math.max(0, resolveNearNextWatchdogAt - Date.now())),
+    );
+
+    const saved = await harness.client.request(
+      "question.answer",
+      {
+        runId,
+        batchId: batch.id,
+        questionId: question.id,
+        expectedVersion: batch.version,
+        selectedOptionId: "recommended",
+      },
+      {
+        expectedRevision: harness.client.revision,
+        idempotencyKey: `answer-${runId}`,
+      },
+    );
+    const savedVersion = (saved.result as { batchVersion: number }).batchVersion;
+    await harness.client.request(
+      "question.resolve",
+      { runId, batchId: batch.id, expectedVersion: savedVersion },
+      {
+        expectedRevision: harness.client.revision,
+        idempotencyKey: `resolve-${runId}`,
+      },
+    );
+    await waitFor(async () => {
+      const run = await harness.engine.store.getRun(runId);
+      return onlyAttempt(run).authorityProviderRequests?.[0]?.settledAt !== undefined;
+    });
+
+    const resumed = await harness.engine.store.getRun(runId);
+    expect(onlyAttempt(resumed).status).toBe("running");
+    expect(onlyAttempt(resumed).authorityProviderRequests).toHaveLength(1);
+    expect(onlyAttempt(resumed).authorityProviderRequests?.[0]?.settledAt).toBeDefined();
+    expect(resumed.activity.some((entry) => entry.message.includes("liveness boundary"))).toBe(
+      false,
+    );
+  }, 60_000);
+
   it("retires a canonical Pi abort on the first explicit resume from paused", async () => {
     const harness = await authorityHarness("pause_canonical_abort");
     const runId = await createRun(harness.client);
@@ -1913,11 +1972,13 @@ function providerProgram(
         allowedTools:
           scenario === "synthesis_threshold"
             ? ["koni_read_file", "koni_submit_output"]
-            : scenario === "rate_limit_provider_error_with_pending_check"
-              ? ["koni_run_check", "koni_submit_output"]
-              : scenario === "failed_provider_tool_call"
-                ? ["koni_write_file", "koni_submit_output"]
-                : ["koni_submit_output"],
+            : scenario === "provider_liveness_question_wait"
+              ? ["koni_ask_question", "koni_submit_output"]
+              : scenario === "rate_limit_provider_error_with_pending_check"
+                ? ["koni_run_check", "koni_submit_output"]
+                : scenario === "failed_provider_tool_call"
+                  ? ["koni_write_file", "koni_submit_output"]
+                  : ["koni_submit_output"],
         readPaths: ["."],
         writePaths: [],
         expectedRevision: input.nextAuthorityRevision,
@@ -1964,6 +2025,14 @@ function providerProgram(
           schemaHash: koniToolSchemaHash("koni_read_file", TERMINAL_OUTPUT_SCHEMA),
           executionMode: "parallel",
           maxResultBytes: koniToolMaxResultBytes("koni_read_file"),
+        });
+      }
+      if (scenario === "provider_liveness_question_wait") {
+        (draft.tools as Array<(typeof draft.tools)[number]>).unshift({
+          name: "koni_ask_question",
+          schemaHash: koniToolSchemaHash("koni_ask_question", TERMINAL_OUTPUT_SCHEMA),
+          executionMode: "sequential",
+          maxResultBytes: koniToolMaxResultBytes("koni_ask_question"),
         });
       }
       if (scenario === "failed_provider_tool_call") {
@@ -2042,11 +2111,13 @@ function providerProgram(
         toolNames:
           scenario === "synthesis_threshold"
             ? ["koni_read_file", "koni_submit_output"]
-            : scenario === "rate_limit_provider_error_with_pending_check"
-              ? ["koni_run_check", "koni_submit_output"]
-              : scenario === "failed_provider_tool_call"
-                ? ["koni_write_file", "koni_submit_output"]
-                : ["koni_submit_output"],
+            : scenario === "provider_liveness_question_wait"
+              ? ["koni_ask_question", "koni_submit_output"]
+              : scenario === "rate_limit_provider_error_with_pending_check"
+                ? ["koni_run_check", "koni_submit_output"]
+                : scenario === "failed_provider_tool_call"
+                  ? ["koni_write_file", "koni_submit_output"]
+                  : ["koni_submit_output"],
         terminalOutputSchema,
         contextContent: context,
         compactionSnapshot: {

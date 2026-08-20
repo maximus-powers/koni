@@ -1285,6 +1285,8 @@ export class RunAuthorityEngine {
   readonly #requestAuthorityShutdown: () => void;
   readonly #providerRequestLivenessTimeoutMs: number;
   readonly #providerRequestLivenessTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  readonly #providerRequestLivenessGenerations = new Map<string, number>();
+  #nextProviderRequestLivenessGeneration = 0;
   readonly #providerTerminalPropagationProbes = new Map<
     string,
     { attempts: number; timer: ReturnType<typeof setTimeout> }
@@ -10636,6 +10638,12 @@ export class RunAuthorityEngine {
     }
     const resolution = projectQuestionBatchResolution(queued);
     const liveWaiter = this.#questionBatchWaiters.get(batchId);
+    const liveAttempt = liveWaiter === undefined ? undefined : run.attempts[batch.attemptId];
+    const liveProviderRequest = liveAttempt?.authorityProviderRequests?.find(isOpenProviderRequest);
+    const liveProviderSpec =
+      liveAttempt === undefined || liveProviderRequest === undefined
+        ? undefined
+        : await this.#loadStoredLaunchSpec(run, liveAttempt);
     const draft = nextRun(run, queued.updatedAt);
     draft.questionBatches ??= {};
     let status: "pending_resume" | "resolved" = "pending_resume";
@@ -10706,6 +10714,15 @@ export class RunAuthorityEngine {
       receipt: receiptFor(request, result),
     });
     if (liveWaiter !== undefined) {
+      // The provider turn remains admitted while the operator answers. Replace a watchdog that
+      // may have been deferred during that wait before delivering the answer back to Pi, so its
+      // resumed work receives a full liveness interval without admitting another request.
+      if (liveProviderSpec !== undefined && liveProviderRequest !== undefined) {
+        this.#scheduleProviderRequestLiveness(
+          liveProviderSpec,
+          liveProviderRequest.reservationId,
+        );
+      }
       liveWaiter.resolve(resolution);
     } else {
       this.#background(async () => {
@@ -12312,11 +12329,15 @@ export class RunAuthorityEngine {
     delayMs = this.#providerRequestLivenessTimeoutMs,
   ): void {
     const key = this.#providerRequestLivenessKey(spec, reservationId);
-    this.#clearProviderRequestLiveness(spec, reservationId);
+    const prior = this.#providerRequestLivenessTimers.get(key);
+    if (prior !== undefined) clearTimeout(prior);
+    const generation = ++this.#nextProviderRequestLivenessGeneration;
+    this.#providerRequestLivenessGenerations.set(key, generation);
     const timer = setTimeout(() => {
+      if (this.#providerRequestLivenessGenerations.get(key) !== generation) return;
       this.#providerRequestLivenessTimers.delete(key);
       this.#background(
-        () => this.#abortStalledProviderRequest(spec, reservationId),
+        () => this.#abortStalledProviderRequest(spec, reservationId, generation),
         spec.identity.runId,
       );
     }, delayMs);
@@ -12349,6 +12370,7 @@ export class RunAuthorityEngine {
     const timer = this.#providerRequestLivenessTimers.get(key);
     if (timer !== undefined) clearTimeout(timer);
     this.#providerRequestLivenessTimers.delete(key);
+    this.#providerRequestLivenessGenerations.delete(key);
   }
 
   #clearProviderRequestLivenessForAttempt(attemptId: string): void {
@@ -12357,11 +12379,15 @@ export class RunAuthorityEngine {
       clearTimeout(timer);
       this.#providerRequestLivenessTimers.delete(key);
     }
+    for (const key of this.#providerRequestLivenessGenerations.keys()) {
+      if (key.includes(`:${attemptId}:`)) this.#providerRequestLivenessGenerations.delete(key);
+    }
   }
 
   #clearAllProviderRequestLiveness(): void {
     for (const timer of this.#providerRequestLivenessTimers.values()) clearTimeout(timer);
     this.#providerRequestLivenessTimers.clear();
+    this.#providerRequestLivenessGenerations.clear();
   }
 
   /**
@@ -12431,18 +12457,48 @@ export class RunAuthorityEngine {
   async #abortStalledProviderRequest(
     spec: Readonly<AgentLaunchSpec>,
     reservationId: string,
+    expectedGeneration?: number,
   ): Promise<void> {
     if (this.#stopRequested || this.#quiesceOutcomeSettlementClosed) return;
+    const key = this.#providerRequestLivenessKey(spec, reservationId);
+    if (
+      expectedGeneration !== undefined &&
+      this.#providerRequestLivenessGenerations.get(key) !== expectedGeneration
+    )
+      return;
     const observed = await this.#store.getRun(spec.identity.runId);
+    if (
+      expectedGeneration !== undefined &&
+      this.#providerRequestLivenessGenerations.get(key) !== expectedGeneration
+    )
+      return;
     const attempt = observed.attempts[spec.identity.attemptId];
     const open = attempt?.authorityProviderRequests?.find(
       (request) => request.reservationId === reservationId && isOpenProviderRequest(request),
     );
     if (attempt === undefined || open === undefined || isTerminalAttempt(attempt.status)) return;
+    // The provider adapter remains inside its admitted turn while an authority-backed question
+    // waits, but that interval is operator latency rather than provider liveness. Recheck after a
+    // fresh bounded interval; answer delivery returns the attempt to `running`, and ordinary
+    // settlement clears this timer as soon as the resumed turn closes.
+    if (attempt.status === "waiting_question") {
+      this.#scheduleProviderRequestLiveness(spec, reservationId);
+      return;
+    }
 
     const reason = `Provider request exceeded the ${this.#providerRequestLivenessTimeoutMs}ms liveness boundary; aborting its contained Pi session`;
     await this.#server.mutateInternal(async ({ revision }) => {
+      if (
+        expectedGeneration !== undefined &&
+        this.#providerRequestLivenessGenerations.get(key) !== expectedGeneration
+      )
+        return this.#noOpInternal(revision);
       const run = await this.#store.getRun(spec.identity.runId);
+      if (
+        expectedGeneration !== undefined &&
+        this.#providerRequestLivenessGenerations.get(key) !== expectedGeneration
+      )
+        return this.#noOpInternal(revision);
       const current = run.attempts[spec.identity.attemptId];
       const request = current?.authorityProviderRequests?.find(
         (candidate) =>
@@ -23186,6 +23242,10 @@ function isRetryableInfrastructureAttempt(attempt: AgentAttemptRecord): boolean 
     // agent-authored semantic failure. Once all provider turns are settled, a fresh attempt is
     // safe to issue through the ordinary retryable-assignment recovery path.
     /activated attempt exceeded the bounded provider outcome deadline/u,
+    // Compatibility for a request watchdog that fired while an authority-backed question was
+    // waiting. Current authorities defer that timer during `waiting_question`; already-settled
+    // historical aborts remain safe to reissue at the explicit Resume boundary.
+    /^Provider request exceeded the [0-9]+ms liveness boundary; aborting its contained Pi session$/u,
     // A provider-outcome watchdog can fail the attempt after the authority has already retired
     // its uncertain reservation. The caller above separately proves no provider exposure remains
     // before resetting the ticket, so this durable infrastructure outcome is safe to re-drive.
