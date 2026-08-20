@@ -21,6 +21,7 @@ import {
   recoverablePlanningTerminalAuthority,
   RunAuthorityEngine,
   type RunCompilerProgram,
+  type RunAuthorityEngineOptions,
 } from "../src/authority/run-engine.js";
 import { PiAttemptProcessSupervisor } from "../src/pi/attempt-process-pool.js";
 import { createAgentLaunchSpec, type AgentLaunchSpec } from "../src/pi/launch-spec.js";
@@ -1573,6 +1574,47 @@ describe("run authority provider reservation lifecycle", () => {
     );
   }, 60_000);
 
+  it("does not abort a watchdog that became stale during live question resolution", async () => {
+    const resolutionReady = deferred<void>();
+    const releaseResolution = deferred<void>();
+    const abortReady = deferred<void>();
+    const releaseAbort = deferred<void>();
+    let arm = false;
+    const harness = await authorityHarness("provider_liveness_question_wait", {
+      providerRequestLivenessTimeoutMs: 500,
+      providerLivenessFault: async (point) => {
+        if (point === "after_live_question_resolution") {
+          resolutionReady.resolve();
+          await releaseResolution.promise;
+        } else if (arm) {
+          abortReady.resolve();
+          await releaseAbort.promise;
+        }
+      },
+    });
+    const runId = await createRun(harness.client);
+    await waitFor(async () => {
+      const run = await harness.engine.store.getRun(runId);
+      return run.lifecycle.phase === "awaiting_questions" && Object.values(run.attempts)[0]?.status === "waiting_question";
+    });
+    const opened = await harness.engine.store.getRun(runId);
+    const batch = Object.values(opened.questionBatches ?? {})[0]!;
+    const question = Object.values(opened.questions)[0]!;
+    const reservedAt = Date.parse(onlyAttempt(opened).authorityProviderRequests![0]!.reservedAt);
+    arm = true;
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, reservedAt + 950 - Date.now())));
+    const saved = await harness.client.request("question.answer", { runId, batchId: batch.id, questionId: question.id, expectedVersion: batch.version, selectedOptionId: "recommended" }, { expectedRevision: harness.client.revision, idempotencyKey: `answer-race-${runId}` });
+    const resolving = harness.client.request("question.resolve", { runId, batchId: batch.id, expectedVersion: (saved.result as { batchVersion: number }).batchVersion }, { expectedRevision: harness.client.revision, idempotencyKey: `resolve-race-${runId}` });
+    await resolutionReady.promise;
+    await abortReady.promise;
+    releaseResolution.resolve();
+    await resolving;
+    releaseAbort.resolve();
+    await waitFor(async () => onlyAttempt(await harness.engine.store.getRun(runId)).authorityProviderRequests?.[0]?.settledAt !== undefined);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect((await harness.engine.store.getRun(runId)).activity.some((entry) => entry.message.includes("liveness boundary"))).toBe(false);
+  }, 60_000);
+
   it("retires a canonical Pi abort on the first explicit resume from paused", async () => {
     const harness = await authorityHarness("pause_canonical_abort");
     const runId = await createRun(harness.client);
@@ -1827,7 +1869,7 @@ describe("run authority provider reservation lifecycle", () => {
 
 async function authorityHarness(
   scenario: string,
-  options: { providerRequestLivenessTimeoutMs?: number } = {},
+  options: Pick<RunAuthorityEngineOptions, "providerRequestLivenessTimeoutMs" | "providerLivenessFault"> = {},
 ): Promise<{
   root: string;
   engine: RunAuthorityEngine;
@@ -1870,6 +1912,13 @@ async function authorityHarness(
   });
   return { root, engine, client, prepareCount: () => prepared, compileCount: () => compiled };
 }
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((next) => { resolve = next; });
+  return { promise, resolve };
+}
+
 
 function providerProgram(
   onPrepare: () => void,

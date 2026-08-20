@@ -1060,6 +1060,11 @@ export interface RunAuthorityEngineOptions {
    * liveness boundary can be tested without shortening real research turns.
    */
   providerRequestLivenessTimeoutMs?: number;
+  /** Test-only provider-liveness race gate. */
+  providerLivenessFault?: (
+    point: "after_live_question_resolution" | "before_liveness_abort_mutation",
+    input: Readonly<{ runId: string; attemptId: string; reservationId: string }>,
+  ) => Promise<void> | void;
 }
 
 /** Select the newest Lead judgment bound to the run's current semantic product. */
@@ -1284,6 +1289,7 @@ export class RunAuthorityEngine {
   readonly #sandboxExecutable: RunAuthorityEngineOptions["sandboxExecutable"];
   readonly #requestAuthorityShutdown: () => void;
   readonly #providerRequestLivenessTimeoutMs: number;
+  readonly #providerLivenessFault: RunAuthorityEngineOptions["providerLivenessFault"];
   readonly #providerRequestLivenessTimers = new Map<string, ReturnType<typeof setTimeout>>();
   readonly #providerRequestLivenessGenerations = new Map<string, number>();
   #nextProviderRequestLivenessGeneration = 0;
@@ -1373,6 +1379,7 @@ export class RunAuthorityEngine {
     this.#providerRequestLivenessTimeoutMs = validatedProviderRequestLivenessTimeout(
       options.providerRequestLivenessTimeoutMs,
     );
+    this.#providerLivenessFault = options.providerLivenessFault;
     this.#registerMethods();
     const observe = (event: SupervisorEvent | PiAttemptProcessSupervisorEvent) => {
       if (event.event.type === "outcome") {
@@ -10718,6 +10725,11 @@ export class RunAuthorityEngine {
       // may have been deferred during that wait before delivering the answer back to Pi, so its
       // resumed work receives a full liveness interval without admitting another request.
       if (liveProviderSpec !== undefined && liveProviderRequest !== undefined) {
+        await this.#providerLivenessFault?.("after_live_question_resolution", {
+          runId,
+          attemptId: batch.attemptId,
+          reservationId: liveProviderRequest.reservationId,
+        });
         this.#scheduleProviderRequestLiveness(
           liveProviderSpec,
           liveProviderRequest.reservationId,
@@ -12486,7 +12498,14 @@ export class RunAuthorityEngine {
       return;
     }
 
+    await this.#providerLivenessFault?.("before_liveness_abort_mutation", {
+      runId: spec.identity.runId,
+      attemptId: spec.identity.attemptId,
+      reservationId,
+    });
+
     const reason = `Provider request exceeded the ${this.#providerRequestLivenessTimeoutMs}ms liveness boundary; aborting its contained Pi session`;
+    let abortRecorded = false;
     await this.#server.mutateInternal(async ({ revision }) => {
       if (
         expectedGeneration !== undefined &&
@@ -12522,8 +12541,15 @@ export class RunAuthorityEngine {
         expectedRevision: revision,
         runWrites: [{ record: draft, expectedRevision: run.revision }],
       });
+      abortRecorded = true;
       return { revision: committed.state.revision };
     });
+    if (
+      !abortRecorded ||
+      (expectedGeneration !== undefined &&
+        this.#providerRequestLivenessGenerations.get(key) !== expectedGeneration)
+    )
+      return;
     const handle = this.#supervisor.get(spec.identity.attemptId);
     if (handle === undefined) return;
     await handle.session.abort(reason);
