@@ -32,6 +32,7 @@ const forbiddenFacadeImports = new Map([
   ["packages/core/src/compiler/graph-constraints.ts", "./run-program.js"],
   ["packages/core/src/compiler/ticket-dependencies.ts", "./run-program.js"],
   ["packages/core/src/pi/interactive-tools.ts", "./managed-session.js"],
+  ["packages/core/src/pi/attempt-process-sources.ts", "./attempt-process-supervisor.js"],
   ["packages/core/src/pi/tool-renderer.ts", "./managed-session.js"],
   ["packages/core/src/pi/transcript-page.ts", "./managed-session.js"],
 ]);

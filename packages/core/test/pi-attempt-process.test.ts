@@ -182,10 +182,13 @@ describe("bounded attempt-process protocol", () => {
 
 describe("supervised autonomous Pi attempt process", () => {
   it("contains exactly one self-group destructive call site and no numeric-group destructive call", async () => {
-    const source = await readFile(
-      fileURLToPath(new URL("../src/pi/attempt-process-supervisor.ts", import.meta.url)),
-      "utf8",
-    );
+    const source = (
+      await Promise.all(
+        ["attempt-process-supervisor.ts", "attempt-process-sources.ts"].map((file) =>
+          readFile(fileURLToPath(new URL(`../src/pi/${file}`, import.meta.url)), "utf8"),
+        ),
+      )
+    ).join("\n");
     expect(source.match(/process\.kill\(0,\s*"SIGKILL"\)/g) ?? []).toHaveLength(1);
     expect(source).not.toMatch(/process\.kill\(-processGroupId,\s*"SIGKILL"\)/);
   });
