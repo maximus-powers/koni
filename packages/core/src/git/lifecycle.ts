@@ -28,6 +28,31 @@ import {
   type GitRunTemplateContext,
   type GitTicketTemplateContext,
 } from "./behavior-policy.js";
+import {
+  GitLifecycleError,
+  dirtyCheckout,
+  errorMessage,
+  invalidState,
+  namespaceCollision,
+  refMoved,
+  translateCasError,
+} from "./lifecycle-errors.js";
+import {
+  isInside,
+  legacyPolicyRunNamespace,
+  legacyRunNamespace,
+  persistedPolicyRunNamespace,
+  policyRunNamespace,
+  policyTicketWorktree,
+  type RunGitNamespace,
+} from "./lifecycle-namespace.js";
+export { GitLifecycleError } from "./lifecycle-errors.js";
+import {
+  assertCommitSubject,
+  assertNamespaceId,
+  assertUserTargetRef,
+  shortTargetBranch,
+} from "./lifecycle-validation.js";
 
 export const GIT_LIFECYCLE_PROTOCOL = "koni.git-lifecycle.v1" as const;
 export const GIT_INTENT_PROTOCOL = "koni.git-intent.v1" as const;
@@ -949,26 +974,6 @@ export function assertGitLifecycleIntent(value: unknown): asserts value is GitLi
         throw new Error(`legacy relocation ${field} must be absolute`);
       }
     }
-  }
-}
-
-export class GitLifecycleError extends Error {
-  public constructor(
-    public readonly code:
-      | "ownership_mismatch"
-      | "dirty_checkout"
-      | "scope_violation"
-      | "ref_moved"
-      | "namespace_collision"
-      | "invalid_state"
-      | "recovery_ambiguous"
-      | "target_missing"
-      | "base_unresolved",
-    message: string,
-    public readonly details: Readonly<Record<string, unknown>> = {},
-  ) {
-    super(message);
-    this.name = "GitLifecycleError";
   }
 }
 
@@ -4276,23 +4281,6 @@ function commitMessage(
   return `${sections.join("\n\n")}\n`;
 }
 
-function assertCommitSubject(value: string): void {
-  if (value.trim().length === 0 || value.length > 8 * 1024 || /[\0\r\n]/u.test(value)) {
-    throw new Error("commit subject must be one bounded non-empty line");
-  }
-}
-
-function assertNamespaceId(value: string, label: string): void {
-  if (
-    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/u.test(value) ||
-    value.includes("..") ||
-    value.endsWith(".") ||
-    value.endsWith(".lock")
-  ) {
-    throw new Error(`${label} is not safe for a compiler-owned Git namespace: ${value}`);
-  }
-}
-
 /**
  * How a run acquires its target branch when the branch does not already exist. Absent (or
  * `create: false`), a missing target is a hard error — this preserves typo safety, since a
@@ -4302,10 +4290,6 @@ function assertNamespaceId(value: string, label: string): void {
 export interface TargetProvisioning {
   create: boolean;
   baseRef?: string;
-}
-
-function shortTargetBranch(ref: string): string {
-  return ref.replace(/^refs\/heads\//u, "");
 }
 
 /**
@@ -4336,157 +4320,6 @@ async function resolveNewTargetBase(client: GitClient, baseRef?: string): Promis
     "base_unresolved",
     "cannot determine a base commit for the new target branch; pass an explicit --from <ref>",
   );
-}
-
-function assertUserTargetRef(value: string): void {
-  if (
-    !value.startsWith("refs/heads/") ||
-    value.length > 1_024 ||
-    /[\u0000-\u0020~^:?*\\[\]]/u.test(value)
-  ) {
-    throw new Error(`target must be a safe local branch ref: ${value}`);
-  }
-  const branch = value.slice("refs/heads/".length);
-  if (
-    branch.includes("..") ||
-    branch.endsWith("/") ||
-    branch.endsWith(".") ||
-    branch
-      .split("/")
-      .some(
-        (component) => component.length === 0 || component === "." || component.endsWith(".lock"),
-      )
-  ) {
-    throw new Error(`target branch ref is malformed: ${value}`);
-  }
-  if (branch === "koni" || branch.startsWith("koni/")) {
-    throw new Error(`compiler-owned branch cannot be selected as a target: ${value}`);
-  }
-}
-
-function invalidState(message: string): GitLifecycleError {
-  return new GitLifecycleError("invalid_state", message);
-}
-
-function namespaceCollision(message: string): GitLifecycleError {
-  return new GitLifecycleError("namespace_collision", message);
-}
-
-function refMoved(message: string, expected: string, actual: string): GitLifecycleError {
-  return new GitLifecycleError("ref_moved", message, { expected, actual });
-}
-
-function dirtyCheckout(label: string, worktree: string): GitLifecycleError {
-  return new GitLifecycleError("dirty_checkout", `${label} is dirty: ${worktree}`, { worktree });
-}
-
-function translateCasError(error: unknown, message: string): Error {
-  if (error instanceof GitCommandError) {
-    return new GitLifecycleError("ref_moved", message, {
-      stderr: error.stderr,
-      argv: error.argv,
-    });
-  }
-  return error instanceof Error ? error : new Error(String(error));
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function isInside(root: string, candidate: string): boolean {
-  const relative = path.relative(path.resolve(root), path.resolve(candidate));
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
-interface RunGitNamespace {
-  root: string;
-  runRef: string;
-  planningWorktree: string;
-  runWorktree: string;
-  ticketRoot: string;
-}
-
-function legacyRunNamespace(commonDirectory: string, runId: string): RunGitNamespace {
-  const root = path.join(commonDirectory, "koni", "worktrees", "runs", runId);
-  return {
-    root,
-    runRef: `refs/heads/koni/runs/${runId}`,
-    planningWorktree: path.join(root, "planning"),
-    runWorktree: path.join(root, "integration"),
-    ticketRoot: path.join(root, "tickets"),
-  };
-}
-
-function policyRunNamespace(
-  commonDirectory: string,
-  policy: GitBehaviorPolicy,
-  run: GitRunTemplateContext,
-): RunGitNamespace {
-  const runRef = renderRunRef(policy, run);
-  const branch = runRef.slice("refs/heads/".length);
-  const root = path.join(
-    resolvePolicyWorktreeRoot(commonDirectory, policy),
-    "runs",
-    ...branch.split("/"),
-  );
-  return {
-    root,
-    runRef,
-    planningWorktree: path.join(root, "planning"),
-    runWorktree: path.join(root, "integration"),
-    ticketRoot: path.join(root, "tickets"),
-  };
-}
-
-/** Exact former layout, used only to authenticate already-issued policy-backed records. */
-function legacyPolicyRunNamespace(
-  commonDirectory: string,
-  policy: GitBehaviorPolicy,
-  run: GitRunTemplateContext,
-): RunGitNamespace {
-  const runRef = renderRunRef(policy, run);
-  const branch = runRef.slice("refs/heads/".length);
-  const root = path.join(
-    resolveLegacyPolicyWorktreeRoot(commonDirectory, policy),
-    "runs",
-    ...branch.split("/"),
-  );
-  return {
-    root,
-    runRef,
-    planningWorktree: path.join(root, "planning"),
-    runWorktree: path.join(root, "integration"),
-    ticketRoot: path.join(root, "tickets"),
-  };
-}
-
-function persistedPolicyRunNamespace(
-  commonDirectory: string,
-  policy: GitBehaviorPolicy,
-  run: GitRunTemplateContext,
-  persisted: RunGitNamespace,
-): RunGitNamespace {
-  const current = policyRunNamespace(commonDirectory, policy, run);
-  if (sameRunNamespace(persisted, current)) return current;
-  const legacy = legacyPolicyRunNamespace(commonDirectory, policy, run);
-  if (sameRunNamespace(persisted, legacy)) return legacy;
-  throw new Error("Git lifecycle run ref is outside its authority namespace");
-}
-
-function sameRunNamespace(left: RunGitNamespace, right: RunGitNamespace): boolean {
-  return (
-    left.root === right.root &&
-    left.runRef === right.runRef &&
-    left.planningWorktree === right.planningWorktree &&
-    left.runWorktree === right.runWorktree &&
-    left.ticketRoot === right.ticketRoot
-  );
-}
-
-function policyTicketWorktree(ticketRoot: string, ticketRef: string): string {
-  if (!ticketRef.startsWith("refs/heads/")) throw new Error("ticket ref is not a local branch");
-  return path.join(ticketRoot, ...ticketRef.slice("refs/heads/".length).split("/"));
 }
 
 function assertNewRunAdmission(
