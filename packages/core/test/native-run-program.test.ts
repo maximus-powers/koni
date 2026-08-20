@@ -1984,7 +1984,7 @@ describe("native compiler-authoritative run program", () => {
       title: second.title,
     });
 
-    const incompleteCycle = structuredClone(run) as typeof run;
+    const incompleteCycle = structuredClone(run);
     incompleteCycle.attempts["attempt-review"]!.ticketExecutionEpoch = 3;
     expect(
       pendingPlannedAssetRepairRequestForNode({
@@ -6206,8 +6206,8 @@ describe("native compiler-authoritative run program", () => {
       at: new Date(FIXED_NOW.getTime() + 2_000).toISOString(),
       instructions: secondSteering,
     });
-    run.attempts["attempt-plan"]!.inputTokens = 125_000;
-    run.attempts["attempt-plan"]!.outputTokens = 8_000;
+    run.attempts["attempt-plan"].inputTokens = 125_000;
+    run.attempts["attempt-plan"].outputTokens = 8_000;
     run.planningSession.currentRevision = 2;
     run.planningSession.revisions[1]!.status = "failed";
     run.planningSession.revisions[1]!.transcriptSha256 = digest(
@@ -6264,8 +6264,8 @@ describe("native compiler-authoritative run program", () => {
     run.planningSession.revisions[1]!.status = "running";
     delete run.planningSession.revisions[1]!.transcriptSha256;
     delete run.planningSession.revisions[1]!.completedAt;
-    run.attempts["attempt-plan"]!.inputTokens = 4_000;
-    run.attempts["attempt-plan"]!.outputTokens = 1_000;
+    run.attempts["attempt-plan"].inputTokens = 4_000;
+    run.attempts["attempt-plan"].outputTokens = 1_000;
     run.planningSession.revisions[1]!.launchSpecSha256 = prepared.spec.specHash;
     run.planningSession.revisions[1]!.grantSha256 = prepared.spec.authority.grantHash;
     await persistWrites(project.projectRoot, prepared.artifactWrites ?? []);
@@ -9535,8 +9535,8 @@ describe("native compiler-authoritative run program", () => {
       },
     };
     expect(Value.Check(prepared.terminalOutputSchema!, upstreamOutput)).toBe(true);
-    const acceptedRecordedChecks = structuredClone(run.checks!);
-    const rejectedConfiguredCheck = run.checks!.find(
+    const acceptedRecordedChecks = structuredClone(run.checks);
+    const rejectedConfiguredCheck = run.checks.find(
       (candidate) => candidate.requestedCheckId === "exact-prerequisite-set",
     )!;
     rejectedConfiguredCheck.accepted = false;

@@ -49,9 +49,16 @@ describe("standalone Configure document authority", () => {
           kind: "native_agent",
           format: "yaml",
         }),
-        expect.objectContaining({ domain: "skills", kind: "skill", format: "markdown" }),
       ]),
     );
+    expect(
+      catalog.documents.some(
+        (document) =>
+          document.domain === "skills" ||
+          document.kind === "skill" ||
+          document.kind === "markdown_prompt",
+      ),
+    ).toBe(false);
     expect(catalog.documents.some((document) => Object.hasOwn(document, "path"))).toBe(false);
     const projectDocument = catalog.documents.find((document) => document.kind === "project")!;
     const source = await authority.read({
@@ -158,20 +165,30 @@ describe("standalone Configure document authority", () => {
       readFile(path.join(project, ".koni", "custom", "release-policy.toml")),
     ).rejects.toMatchObject({ code: "ENOENT" });
 
-    const withSkill = await authority.create({
-      catalogToken: removed.catalog.catalogToken,
-      domain: "skills",
-      kind: "skill",
-      format: "markdown",
-      title: "Review Incidents",
-    });
-    expect(withSkill.catalog.valid).toBe(true);
-    expect(
-      await readFile(
+    await expect(
+      authority.create({
+        catalogToken: removed.catalog.catalogToken,
+        domain: "skills",
+        kind: "skill",
+        format: "markdown",
+        title: "Review Incidents",
+      }),
+    ).rejects.toMatchObject({ code: "pi_resource_native" });
+    await expect(
+      authority.create({
+        catalogToken: removed.catalog.catalogToken,
+        domain: "skills",
+        kind: "markdown_prompt",
+        format: "markdown",
+        title: "Release Review",
+      }),
+    ).rejects.toMatchObject({ code: "pi_resource_native" });
+    await expect(
+      readFile(
         path.join(project, ".koni", "resources", "skills", "review-incidents", "SKILL.md"),
         "utf8",
       ),
-    ).toContain("# Review Incidents");
+    ).rejects.toMatchObject({ code: "ENOENT" });
   }, 120_000);
 
   it("rolls back an invalid delete and rejects unsafe domain-kind-path combinations", async () => {
