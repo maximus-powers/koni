@@ -21,7 +21,6 @@ import { assertRunRecord, type RunRecord } from "../state/run-record.js";
 import {
   STAGE_ACTION_INVOCATION_PROTOCOL,
   type StageActionCapability,
-  type StageActionFieldSchema,
   type StageActionValue,
   type StageCapabilityBinding,
   type StageCapabilityCatalog,
@@ -2658,7 +2657,7 @@ export class ControlCenterController {
         focus: "documents",
         editing: false,
         dirty: false,
-        returnTo: cloneModal(returnTo) as ConfigureModalState,
+        returnTo: cloneModal(returnTo),
       };
       this.#modal = modal;
       await this.#readSelectedConfigDocument(modal);

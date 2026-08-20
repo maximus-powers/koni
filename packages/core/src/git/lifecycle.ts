@@ -1,12 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import path from "node:path";
-import {
-  GitClient,
-  GitCommandError,
-  type GitCommitIdentity,
-  type GitTreeMergeResult,
-} from "./client.js";
+import { GitClient, type GitCommitIdentity, type GitTreeMergeResult } from "./client.js";
 import {
   inspectGitPathScope,
   type GitPathScope,
@@ -20,8 +15,6 @@ import {
   renderRunRef,
   renderTicketCommitSubject,
   renderTicketRef,
-  resolveLegacyPolicyWorktreeRoot,
-  resolvePolicyWorktreeRoot,
   resolveRepositoryWorktreeNamespaceRoot,
   type GitBehaviorPolicy,
   type GitRunAdmission,
@@ -39,7 +32,6 @@ import {
 } from "./lifecycle-errors.js";
 import {
   isInside,
-  legacyPolicyRunNamespace,
   legacyRunNamespace,
   persistedPolicyRunNamespace,
   policyRunNamespace,
