@@ -8,6 +8,12 @@ import ts from "typescript";
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
 const sourceRoot = path.join(repositoryRoot, "packages/core/src");
 const defaultLineLimit = 2_500;
+const reviewedPackageRootExports = JSON.parse(
+  await readFile(
+    path.join(repositoryRoot, "scripts/fixtures/core-api-exports-ff09606.json"),
+    "utf8",
+  ),
+);
 
 const runProgramValueExports = [
   "applyReviewEffects",
@@ -202,19 +208,8 @@ test("extracted leaf modules do not import their owning facade", async () => {
   assert.deepEqual(violations, [], violations.join("\n"));
 });
 
-test("run compiler facade and package root preserve the reviewed export surface", () => {
-  const configPath = path.join(repositoryRoot, "packages/core/tsconfig.json");
-  const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
-  assert.equal(configFile.error, undefined);
-  const config = ts.parseJsonConfigFileContent(configFile.config, ts.sys, path.dirname(configPath));
-  const program = ts.createProgram(config.fileNames, config.options);
-  const checker = program.getTypeChecker();
-  const runProgramExports = moduleExports(
-    program,
-    checker,
-    "packages/core/src/compiler/run-program.ts",
-  );
-  const packageRootExports = moduleExports(program, checker, "packages/core/src/index.ts");
+test("compiler facade and full package root preserve the reviewed export surface", () => {
+  const { checker, packageRootExports, runProgramExports } = coreExportContext();
 
   assert.deepEqual([...runProgramExports.keys()].sort(), intendedRunProgramExports);
   assert.deepEqual(
@@ -227,6 +222,38 @@ test("run compiler facade and package root preserve the reviewed export surface"
     runProgramClassExports,
   );
 
+  assertRunProgramAtPackageRoot(packageRootExports, runProgramExports, checker);
+});
+
+test("package root boundary rejects non-run-program export drift", () => {
+  const { checker, packageRootExports, runProgramExports } = coreExportContext();
+  const driftedPackageRootExports = new Map(packageRootExports);
+  driftedPackageRootExports.set(
+    "syntheticNonRunProgramDrift",
+    packageRootExports.get("AuthorityClient"),
+  );
+
+  assert.throws(() =>
+    assertRunProgramAtPackageRoot(driftedPackageRootExports, runProgramExports, checker),
+  );
+});
+
+function coreExportContext() {
+  const configPath = path.join(repositoryRoot, "packages/core/tsconfig.json");
+  const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
+  assert.equal(configFile.error, undefined);
+  const config = ts.parseJsonConfigFileContent(configFile.config, ts.sys, path.dirname(configPath));
+  const program = ts.createProgram(config.fileNames, config.options);
+  const checker = program.getTypeChecker();
+  return {
+    checker,
+    packageRootExports: moduleExports(program, checker, "packages/core/src/index.ts"),
+    runProgramExports: moduleExports(program, checker, "packages/core/src/compiler/run-program.ts"),
+  };
+}
+
+function assertRunProgramAtPackageRoot(packageRootExports, runProgramExports, checker) {
+  assertReviewedPackageRootSurface(packageRootExports, checker);
   const runProgramFamilyAtPackageRoot = [...packageRootExports.entries()]
     .filter(([, symbol]) => symbolComesFromRunProgramFamily(resolveAlias(symbol, checker)))
     .map(([name]) => name)
@@ -240,7 +267,23 @@ test("run compiler facade and package root preserve the reviewed export surface"
       `${name} must preserve its run-program symbol identity at the package root`,
     );
   }
-});
+}
+
+function assertReviewedPackageRootSurface(packageRootExports, checker) {
+  assert.equal(reviewedPackageRootExports.reviewedBase, "ff09606");
+  const reviewedNames = [
+    ...reviewedPackageRootExports.value,
+    ...reviewedPackageRootExports.type,
+    ...reviewedPackageRootExports.class,
+  ].sort();
+  assert.deepEqual([...packageRootExports.keys()].sort(), reviewedNames);
+  for (const identity of ["value", "type", "class"]) {
+    assert.deepEqual(
+      exportsWithIdentity(packageRootExports, checker, identity),
+      reviewedPackageRootExports[identity],
+    );
+  }
+}
 
 function moduleExports(program, checker, relativePath) {
   const sourceFile = program.getSourceFile(path.join(repositoryRoot, relativePath));
@@ -258,7 +301,7 @@ function exportsWithIdentity(exports, checker, identity) {
       const flags = resolveAlias(symbol, checker).flags;
       const hasValue = Boolean(flags & ts.SymbolFlags.Value);
       const hasType = Boolean(flags & ts.SymbolFlags.Type);
-      if (identity === "class") return hasValue && hasType;
+      if (identity === "class") return Boolean(flags & ts.SymbolFlags.Class);
       if (identity === "value") return hasValue && !hasType;
       return hasType && !hasValue;
     })
