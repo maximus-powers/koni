@@ -28,6 +28,7 @@ const forbiddenFacadeImports = new Map([
   ["packages/core/src/authority/monitor-methods.ts", "./run-engine.js"],
   ["packages/core/src/authority/monitor-projection.ts", "./run-engine.js"],
   ["packages/core/src/compiler/action-recipes.ts", "./run-program.js"],
+  ["packages/core/src/compiler/configuration-values.ts", "./configuration.js"],
   ["packages/core/src/compiler/execution-semantics.ts", "./run-program.js"],
   ["packages/core/src/compiler/graph-constraints.ts", "./run-program.js"],
   ["packages/core/src/compiler/ticket-dependencies.ts", "./run-program.js"],
