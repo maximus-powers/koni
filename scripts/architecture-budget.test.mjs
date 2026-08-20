@@ -32,6 +32,7 @@ const forbiddenFacadeImports = new Map([
   ["packages/core/src/compiler/execution-semantics.ts", "./run-program.js"],
   ["packages/core/src/compiler/graph-constraints.ts", "./run-program.js"],
   ["packages/core/src/compiler/ticket-dependencies.ts", "./run-program.js"],
+  ["packages/core/src/control-center/controller-fields.ts", "./controller.js"],
   ["packages/core/src/git/lifecycle-errors.ts", "./lifecycle.js"],
   ["packages/core/src/git/lifecycle-namespace.ts", "./lifecycle.js"],
   ["packages/core/src/git/lifecycle-validation.ts", "./lifecycle.js"],
