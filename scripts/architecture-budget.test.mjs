@@ -38,6 +38,8 @@ const forbiddenFacadeImports = new Map([
   ["packages/core/src/git/lifecycle-validation.ts", "./lifecycle.js"],
   ["packages/core/src/pi/interactive-tools.ts", "./managed-session.js"],
   ["packages/core/src/pi/attempt-process-sources.ts", "./attempt-process-supervisor.js"],
+  ["packages/core/src/pi/managed-session-contracts.ts", "./managed-session.js"],
+  ["packages/core/src/pi/managed-session-runtime.ts", "./managed-session.js"],
   ["packages/core/src/pi/tool-renderer.ts", "./managed-session.js"],
   ["packages/core/src/pi/transcript-page.ts", "./managed-session.js"],
 ]);
