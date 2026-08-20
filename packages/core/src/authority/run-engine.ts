@@ -3794,11 +3794,11 @@ export class RunAuthorityEngine {
       receipt: receiptFor(request, result),
       ...(definition.artifactWrites === undefined ? {} : { writes: definition.artifactWrites }),
     });
-    this.#background(() => this.#initializeRun(runId), runId);
     return {
       result,
       revision: committed.state.revision,
       events: [{ topic: "run.created", payload: { runId } }],
+      afterResponse: () => this.#background(() => this.#initializeRun(runId), runId),
     };
   }
 

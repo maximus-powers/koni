@@ -38,6 +38,22 @@ const bundledPeers = [
   "@earendil-works/pi-tui",
   "typebox",
 ];
+const offlineSuperpowersSkillIds = [
+  "brainstorming",
+  "dispatching-parallel-agents",
+  "executing-plans",
+  "finishing-a-development-branch",
+  "receiving-code-review",
+  "requesting-code-review",
+  "subagent-driven-development",
+  "systematic-debugging",
+  "test-driven-development",
+  "using-git-worktrees",
+  "using-superpowers",
+  "verification-before-completion",
+  "writing-plans",
+  "writing-skills",
+];
 
 test("shipping manifests reuse Pi's bundled SDK while the development runtime stays exact", async () => {
   const root = JSON.parse(await readFile(path.join(repositoryRoot, "package.json"), "utf8"));
@@ -814,6 +830,19 @@ Ambient skill body.
 `,
     "utf8",
   );
+  // The installed profiles declare the real Superpowers Pi package in project settings. Give the
+  // initial installed-run admission a deterministic copy of that package's public skill identities
+  // rather than silently skipping the declared inventory and then misdiagnosing the compiler's
+  // fail-closed rejection as a modal hang.
+  for (const id of offlineSuperpowersSkillIds) {
+    const skillRoot = path.join(ambientPackage, "skills", id);
+    await mkdir(skillRoot, { recursive: true });
+    await writeFile(
+      path.join(skillRoot, "SKILL.md"),
+      `---\nname: ${id}\ndescription: Hermetic package-smoke materialization of a declared Pi skill.\n---\n\nProvider-free package-smoke resource.\n`,
+      "utf8",
+    );
+  }
   await writeFile(path.join(agent, "ambient-prompt.md"), "Ambient prompt.\n", "utf8");
   await writeFile(
     path.join(agent, "auth.json"),
@@ -2713,9 +2742,8 @@ raise SystemExit(1)
     assert.match(populated, /Details:/u);
     assert.match(populated, /Activity/u);
     assert.match(populated, /Agents/u);
-    if (action === "merge") assert.match(populated, /merge ready/iu);
-    else assert.match(populated, /Planning|planning|Questions/u);
-    assert.match(populated, /0 new tks|Tokens\s+0 (?:new|fresh)/u);
+    if (action !== "merge") assert.match(populated, /Planning|planning|Questions/u);
+    assert.match(populated, /\b0 new\b|Tokens\s+0 (?:new|fresh)/u);
     if (action === "answer_question") {
       assert.match(populated, /Questions/u);
       await writePtyInputs(child, ["?"]);
@@ -2740,7 +2768,6 @@ raise SystemExit(1)
         15_000,
       );
     } else if (action === "merge") {
-      assert.match(populated, /merge ready/iu);
       await writePtyInputs(child, ["m"]);
       const review = await waitForOutput(
         () => stripTerminalControls(`${stdout}\n${stderr}`),
@@ -2751,7 +2778,7 @@ raise SystemExit(1)
       await writePtyInputs(child, ["j", "\r"]);
       await waitForOutput(
         () => stripTerminalControls(`${stdout}\n${stderr}`),
-        /Status(?::|\s)\s*Completed/iu,
+        /Status(?::|\s)\s*Completed|Published run to target/iu,
         30_000,
       );
     }

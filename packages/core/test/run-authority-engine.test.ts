@@ -1,6 +1,7 @@
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Type, type TSchema } from "typebox";
@@ -1679,6 +1680,95 @@ describe("run authority engine", () => {
     expect(clean.result).toMatchObject({ runId: expect.any(String), status: "starting" });
     expect(clean.result).not.toHaveProperty("warning");
     client.close();
+  });
+
+  it("starts admitted run initialization only after the creation response flushes", async () => {
+    const root = await repository();
+    const originalMaterialize = IsolatedGitLifecycle.prototype.materializePlanning;
+    let initializationStarted = false;
+    let observeInitialization: () => void = () => {};
+    const initializationObserved = new Promise<void>((resolve) => {
+      observeInitialization = resolve;
+    });
+    let releaseInitialization: () => void = () => {};
+    const initializationGate = new Promise<void>((resolve) => {
+      releaseInitialization = resolve;
+    });
+    const materialize = vi
+      .spyOn(IsolatedGitLifecycle.prototype, "materializePlanning")
+      .mockImplementation(async function (this: IsolatedGitLifecycle, ...args) {
+        initializationStarted = true;
+        observeInitialization();
+        await initializationGate;
+        return originalMaterialize.apply(this, args);
+      });
+    const originalWrite = Socket.prototype.write;
+    const invokeOriginalWrite = (
+      socket: Socket,
+      chunk: Uint8Array | string,
+      args: unknown[],
+    ): boolean => Reflect.apply(originalWrite, socket, [chunk, ...args]) as boolean;
+    let releaseResponseFlush: (() => void) | undefined;
+    const socketWrite = vi.spyOn(Socket.prototype, "write").mockImplementation(function (
+      this: Socket,
+      chunk: Uint8Array | string,
+      ...args: unknown[]
+    ): boolean {
+      const bytes = typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk);
+      if (bytes.includes(Buffer.from('"status":"starting"'))) {
+        const callback = typeof args.at(-1) === "function" ? (args.pop() as () => void) : undefined;
+        return invokeOriginalWrite(this, chunk, [
+          ...args,
+          () => {
+            releaseResponseFlush = callback;
+          },
+        ]);
+      }
+      return invokeOriginalWrite(this, chunk, args);
+    });
+    try {
+      const engine = await RunAuthorityEngine.open({
+        projectRoot: root,
+        version: "1.0.0",
+        program: directApprovalProgram(),
+        supervisor: new ManagedSessionSupervisor(),
+      });
+      engines.push(engine);
+      await engine.start();
+      const client = await AuthorityClient.connect({
+        projectRoot: root,
+        client: "tui",
+        version: "1.0.0",
+      });
+      const created = await client.request(
+        "run.create",
+        {
+          objective: "Flush admission before initialization",
+          runTypeId: "small",
+          targetRef: "refs/heads/main",
+          intake: { goal: "Flush admission before initialization" },
+        },
+        { expectedRevision: 0, idempotencyKey: "create-after-response-flush" },
+      );
+      expect(created.result).toMatchObject({ status: "starting" });
+      await vi.waitFor(() => expect(releaseResponseFlush).toBeDefined());
+      const initializedBeforeFlush = await Promise.race([
+        initializationObserved.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 500)),
+      ]);
+      expect(initializedBeforeFlush).toBe(false);
+      expect(initializationStarted).toBe(false);
+
+      releaseResponseFlush?.();
+      await vi.waitFor(() => expect(initializationStarted).toBe(true));
+      releaseInitialization();
+      client.close();
+    } finally {
+      releaseResponseFlush?.();
+      releaseInitialization();
+      socketWrite.mockRestore();
+      materialize.mockRestore();
+    }
   });
 
   it("records proposal approval and later audit-only steering through one idempotent authority RPC", async () => {
