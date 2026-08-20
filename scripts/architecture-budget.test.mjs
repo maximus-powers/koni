@@ -42,6 +42,9 @@ const forbiddenFacadeImports = new Map([
   ["packages/core/src/pi/managed-session-runtime.ts", "./managed-session.js"],
   ["packages/core/src/pi/tool-renderer.ts", "./managed-session.js"],
   ["packages/core/src/pi/transcript-page.ts", "./managed-session.js"],
+  ["packages/core/src/state/run-record-archive.ts", "./run-record.js"],
+  ["packages/core/src/state/run-record-contracts.ts", "./run-record.js"],
+  ["packages/core/src/state/run-record-validation.ts", "./run-record.js"],
 ]);
 
 test("production TypeScript modules stay within their architecture budgets", async () => {
