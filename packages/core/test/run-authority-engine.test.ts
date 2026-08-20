@@ -737,35 +737,7 @@ describe("run authority engine", () => {
   });
 
   it("reissues a settled ticket attempt aborted by the provider liveness watchdog", () => {
-    const failed = {
-      id: "attempt-provider-liveness-timeout",
-      ticketId: "ticket-one",
-      stepId: "implement",
-      ticketExecutionEpoch: 0,
-      status: "aborted",
-      error:
-        "Provider request exceeded the 600000ms liveness boundary; aborting its contained Pi session",
-    } as AgentAttemptRecord;
-    const ticket = {
-      id: failed.ticketId,
-      title: "Execute work",
-      status: "blocked",
-      blocker: failed.error,
-      executionEpoch: 0,
-      steps: [
-        {
-          id: failed.stepId,
-          kind: "production",
-          status: "failed",
-          attemptIds: [failed.id],
-        },
-      ],
-    } as unknown as TicketRecord;
-    const run = {
-      tickets: { [ticket.id]: ticket },
-      attempts: { [failed.id]: failed },
-      git: { ticketCycles: {} },
-    } as unknown as RunRecord;
+    const { run, ticket } = providerLivenessFailureFixture(true);
 
     expect(
       resetRetryableInfrastructureAssignment(run, ticket.id, "2026-08-14T23:30:00.000Z"),
@@ -773,6 +745,18 @@ describe("run authority engine", () => {
     expect(ticket.status).toBe("queued");
     expect(ticket.blocker).toBeUndefined();
     expect(ticket.steps[0]?.status).toBe("pending");
+  });
+
+  it("keeps a ticket blocked while its historical provider liveness request remains open", () => {
+    const { run, ticket } = providerLivenessFailureFixture(false);
+    const before = structuredClone(run);
+
+    expect(
+      resetRetryableInfrastructureAssignment(run, ticket.id, "2026-08-14T23:30:00.000Z"),
+    ).toBeUndefined();
+    expect(run).toEqual(before);
+    expect(ticket.status).toBe("blocked");
+    expect(ticket.steps[0]?.status).toBe("failed");
   });
 
   it("counts an exact recovery marker before a successor exists and blocks a second spend in the same epoch", () => {
@@ -14973,6 +14957,79 @@ function ticket(): TicketRecord {
     createdAt: now,
     updatedAt: now,
   };
+}
+
+function providerLivenessFailureFixture(settled: boolean): {
+  run: RunRecord;
+  ticket: TicketRecord;
+} {
+  const error =
+    "Provider request exceeded the 600000ms liveness boundary; aborting its contained Pi session";
+  const failed = {
+    id: "attempt-provider-liveness-timeout",
+    sessionId: "session-provider-liveness-timeout",
+    ticketId: "ticket-one",
+    stepId: "implement",
+    personaId: "implementer",
+    modelProvider: "openai-codex",
+    modelId: "gpt-5.6-terra",
+    thinkingLevel: "high",
+    ticketExecutionEpoch: 0,
+    status: "aborted",
+    launchSpecHash: rawSha256("historical provider liveness launch"),
+    startedAt: "2026-08-14T23:00:00.000Z",
+    endedAt: "2026-08-14T23:01:00.000Z",
+    inputTokens: settled ? 1 : 0,
+    outputTokens: settled ? 1 : 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    kind: "ticket",
+    error,
+    authorityProviderRequests: [
+      {
+        sequence: 1,
+        reservationId: "provider-liveness-request",
+        api: "openai-codex-responses",
+        modelId: "gpt-5.6-terra",
+        payloadSha256: rawSha256("historical provider request"),
+        payloadSizeBytes: 1,
+        baselineEntryId: "baseline",
+        prospectiveInputTokens: 1,
+        reservedOutputTokens: 1,
+        reservedAt: "2026-08-14T23:00:00.000Z",
+        ...(settled
+          ? {
+              settledAt: "2026-08-14T23:01:00.000Z",
+              assistantEntryId: "assistant",
+              assistantEntrySha256: rawSha256("historical provider assistant"),
+              inputTokens: 1,
+              outputTokens: 1,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+            }
+          : {}),
+      },
+    ],
+  } as AgentAttemptRecord;
+  const value = {
+    ...ticket(),
+    status: "blocked",
+    blocker: error,
+    executionEpoch: 0,
+  } as TicketRecord;
+  value.steps[0] = {
+    ...value.steps[0]!,
+    status: "failed",
+    attemptIds: [failed.id],
+    startedAt: failed.startedAt,
+    completedAt: failed.endedAt,
+  };
+  const run = {
+    tickets: { [value.id]: value },
+    attempts: { [failed.id]: failed },
+    git: { ticketCycles: {} },
+  } as unknown as RunRecord;
+  return { run, ticket: value };
 }
 
 function configuredCheckInfrastructureRetryFixture(

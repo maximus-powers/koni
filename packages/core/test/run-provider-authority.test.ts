@@ -1574,6 +1574,133 @@ describe("run authority provider reservation lifecycle", () => {
     );
   }, 60_000);
 
+  it("continues a durable question through a fresh provider attempt after authority restart", async () => {
+    const scenario = "assignment_provider_liveness_question_wait";
+    const livenessTimeoutMs = 1_000;
+    const harness = await authorityHarness(scenario, {
+      providerRequestLivenessTimeoutMs: livenessTimeoutMs,
+    });
+    const runId = await createRun(harness.client);
+    await waitFor(
+      async () =>
+        (await harness.engine.store.getRun(runId)).lifecycle.phase === "awaiting_approval",
+    );
+    await harness.client.request("authority.ping");
+    await harness.client.request(
+      "plan.approve",
+      { runId },
+      {
+        expectedRevision: harness.client.revision,
+        idempotencyKey: `approve-cold-question-${runId}`,
+      },
+    );
+    await waitFor(async () => {
+      const run = await harness.engine.store.getRun(runId);
+      return (
+        run.lifecycle.phase === "awaiting_questions" &&
+        Object.values(run.attempts).some(
+          (attempt) => attempt.kind === "ticket" && attempt.status === "waiting_question",
+        )
+      );
+    });
+    const opened = await harness.engine.store.getRun(runId);
+    const batch = Object.values(opened.questionBatches ?? {})[0]!;
+    const question = Object.values(opened.questions)[0]!;
+    const oldAttempt = Object.values(opened.attempts).find(
+      (attempt) => attempt.kind === "ticket" && attempt.status === "waiting_question",
+    )!;
+    expect(batch.status).toBe("pending_answers");
+    expect(oldAttempt.authorityProviderRequests?.[0]?.settledAt).toBeUndefined();
+
+    await harness.engine.stop();
+    engines.splice(engines.indexOf(harness.engine), 1);
+    harness.client.close();
+    const restarted = await RunAuthorityEngine.open({
+      projectRoot: harness.root,
+      version: "1.0.0",
+      program: providerProgram(
+        () => {},
+        () => {},
+        scenario,
+      ),
+      providerRequestLivenessTimeoutMs: livenessTimeoutMs,
+      supervisor: new PiAttemptProcessSupervisor({
+        deferActivationUntilAuthorityCommit: true,
+        runtime: {
+          childEntry: fixtureEntry,
+          additionalEnvironment: { KONI_TEST_PROVIDER_SCENARIO: scenario },
+        },
+      }),
+    });
+    engines.push(restarted);
+    await restarted.start();
+    const cold = await restarted.store.getRun(runId);
+    expect(cold.questionBatches?.[batch.id]?.status).toBe("pending_answers");
+    expect(cold.attempts[oldAttempt.id]?.status).toBe("waiting_question");
+    const client = await AuthorityClient.connect({
+      projectRoot: harness.root,
+      client: "tui",
+      version: "1.0.0",
+    });
+    const saved = await client.request(
+      "question.answer",
+      {
+        runId,
+        batchId: batch.id,
+        questionId: question.id,
+        expectedVersion: batch.version,
+        selectedOptionId: "recommended",
+      },
+      { expectedRevision: client.revision, idempotencyKey: `answer-cold-${runId}` },
+    );
+    await client.request(
+      "question.resolve",
+      {
+        runId,
+        batchId: batch.id,
+        expectedVersion: (saved.result as { batchVersion: number }).batchVersion,
+      },
+      { expectedRevision: client.revision, idempotencyKey: `resolve-cold-${runId}` },
+    );
+    await waitFor(async () => {
+      const ticketAttempts = Object.values((await restarted.store.getRun(runId)).attempts).filter(
+        (attempt) => attempt.kind === "ticket" && attempt.ticketId === "ticket-one",
+      );
+      return (
+        ticketAttempts.length === 2 &&
+        ticketAttempts.some(
+          (attempt) => attempt.id !== oldAttempt.id && attempt.status === "completed",
+        )
+      );
+    });
+    await new Promise((resolve) => setTimeout(resolve, livenessTimeoutMs + 100));
+    const continued = await restarted.store.getRun(runId);
+    const freshAttempt = Object.values(continued.attempts).find(
+      (attempt) => attempt.kind === "ticket" && attempt.id !== oldAttempt.id,
+    )!;
+    expect(continued.questionBatches?.[batch.id]?.status).toBe("resolved");
+    expect(continued.attempts[oldAttempt.id]).toMatchObject({
+      status: "interrupted",
+      terminalSummary: "Continued in a fresh answer-linked attempt",
+    });
+    expect(
+      continued.attempts[oldAttempt.id]?.authorityProviderRequests?.[0]?.settledAt,
+    ).toBeDefined();
+    expect(freshAttempt).toMatchObject({
+      status: "completed",
+      lineage: {
+        branchEpoch: 1,
+        reason: "recovery",
+        parentAttemptId: oldAttempt.id,
+      },
+    });
+    expect(freshAttempt.authorityProviderRequests?.[0]?.settledAt).toBeDefined();
+    expect(continued.activity.some((entry) => entry.message.includes("liveness boundary"))).toBe(
+      false,
+    );
+    client.close();
+  }, 60_000);
+
   it("does not abort a watchdog that became stale during live question resolution", async () => {
     const resolutionReady = deferred<void>();
     const releaseResolution = deferred<void>();
@@ -1595,24 +1722,55 @@ describe("run authority provider reservation lifecycle", () => {
     const runId = await createRun(harness.client);
     await waitFor(async () => {
       const run = await harness.engine.store.getRun(runId);
-      return run.lifecycle.phase === "awaiting_questions" && Object.values(run.attempts)[0]?.status === "waiting_question";
+      return (
+        run.lifecycle.phase === "awaiting_questions" &&
+        Object.values(run.attempts)[0]?.status === "waiting_question"
+      );
     });
     const opened = await harness.engine.store.getRun(runId);
     const batch = Object.values(opened.questionBatches ?? {})[0]!;
     const question = Object.values(opened.questions)[0]!;
     const reservedAt = Date.parse(onlyAttempt(opened).authorityProviderRequests![0]!.reservedAt);
     arm = true;
-    await new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, reservedAt + 950 - Date.now())));
-    const saved = await harness.client.request("question.answer", { runId, batchId: batch.id, questionId: question.id, expectedVersion: batch.version, selectedOptionId: "recommended" }, { expectedRevision: harness.client.revision, idempotencyKey: `answer-race-${runId}` });
-    const resolving = harness.client.request("question.resolve", { runId, batchId: batch.id, expectedVersion: (saved.result as { batchVersion: number }).batchVersion }, { expectedRevision: harness.client.revision, idempotencyKey: `resolve-race-${runId}` });
+    await new Promise<void>((resolve) =>
+      setTimeout(resolve, Math.max(0, reservedAt + 950 - Date.now())),
+    );
+    const saved = await harness.client.request(
+      "question.answer",
+      {
+        runId,
+        batchId: batch.id,
+        questionId: question.id,
+        expectedVersion: batch.version,
+        selectedOptionId: "recommended",
+      },
+      { expectedRevision: harness.client.revision, idempotencyKey: `answer-race-${runId}` },
+    );
+    const resolving = harness.client.request(
+      "question.resolve",
+      {
+        runId,
+        batchId: batch.id,
+        expectedVersion: (saved.result as { batchVersion: number }).batchVersion,
+      },
+      { expectedRevision: harness.client.revision, idempotencyKey: `resolve-race-${runId}` },
+    );
     await resolutionReady.promise;
     await abortReady.promise;
     releaseResolution.resolve();
     await resolving;
     releaseAbort.resolve();
-    await waitFor(async () => onlyAttempt(await harness.engine.store.getRun(runId)).authorityProviderRequests?.[0]?.settledAt !== undefined);
+    await waitFor(
+      async () =>
+        onlyAttempt(await harness.engine.store.getRun(runId)).authorityProviderRequests?.[0]
+          ?.settledAt !== undefined,
+    );
     await new Promise((resolve) => setTimeout(resolve, 600));
-    expect((await harness.engine.store.getRun(runId)).activity.some((entry) => entry.message.includes("liveness boundary"))).toBe(false);
+    expect(
+      (await harness.engine.store.getRun(runId)).activity.some((entry) =>
+        entry.message.includes("liveness boundary"),
+      ),
+    ).toBe(false);
   }, 60_000);
 
   it("retires a canonical Pi abort on the first explicit resume from paused", async () => {
@@ -1869,7 +2027,10 @@ describe("run authority provider reservation lifecycle", () => {
 
 async function authorityHarness(
   scenario: string,
-  options: Pick<RunAuthorityEngineOptions, "providerRequestLivenessTimeoutMs" | "providerLivenessFault"> = {},
+  options: Pick<
+    RunAuthorityEngineOptions,
+    "providerRequestLivenessTimeoutMs" | "providerLivenessFault"
+  > = {},
 ): Promise<{
   root: string;
   engine: RunAuthorityEngine;
@@ -1915,10 +2076,11 @@ async function authorityHarness(
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((next) => { resolve = next; });
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
   return { promise, resolve };
 }
-
 
 function providerProgram(
   onPrepare: () => void,
@@ -1996,6 +2158,11 @@ function providerProgram(
     },
     async prepareAttempt(input) {
       onPrepare();
+      const providerLivenessQuestionAttempt =
+        scenario === "provider_liveness_question_wait" ||
+        (scenario === "assignment_provider_liveness_question_wait" &&
+          input.kind === "ticket" &&
+          input.lineage.branchEpoch === 0);
       const ticketId =
         input.kind === "lead"
           ? "run-orchestration"
@@ -2021,7 +2188,7 @@ function providerProgram(
         allowedTools:
           scenario === "synthesis_threshold"
             ? ["koni_read_file", "koni_submit_output"]
-            : scenario === "provider_liveness_question_wait"
+            : providerLivenessQuestionAttempt
               ? ["koni_ask_question", "koni_submit_output"]
               : scenario === "rate_limit_provider_error_with_pending_check"
                 ? ["koni_run_check", "koni_submit_output"]
@@ -2076,7 +2243,7 @@ function providerProgram(
           maxResultBytes: koniToolMaxResultBytes("koni_read_file"),
         });
       }
-      if (scenario === "provider_liveness_question_wait") {
+      if (providerLivenessQuestionAttempt) {
         (draft.tools as Array<(typeof draft.tools)[number]>).unshift({
           name: "koni_ask_question",
           schemaHash: koniToolSchemaHash("koni_ask_question", TERMINAL_OUTPUT_SCHEMA),
@@ -2160,7 +2327,7 @@ function providerProgram(
         toolNames:
           scenario === "synthesis_threshold"
             ? ["koni_read_file", "koni_submit_output"]
-            : scenario === "provider_liveness_question_wait"
+            : providerLivenessQuestionAttempt
               ? ["koni_ask_question", "koni_submit_output"]
               : scenario === "rate_limit_provider_error_with_pending_check"
                 ? ["koni_run_check", "koni_submit_output"]

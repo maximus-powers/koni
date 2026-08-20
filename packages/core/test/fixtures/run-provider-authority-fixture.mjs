@@ -132,7 +132,7 @@ function onFrame(frame) {
     )
       return;
     appendAssistant();
-    if (scenario === "provider_liveness_question_wait") {
+    if (isProviderLivenessQuestionAttempt()) {
       requestQuestion();
       return;
     }
@@ -224,14 +224,14 @@ function onFrame(frame) {
     }
     return;
   }
-  if (frame.requestId === "question" && scenario === "provider_liveness_question_wait") {
+  if (frame.requestId === "question" && isProviderLivenessQuestionAttempt()) {
     if (!frame.ok || frame.value?.outcome !== "accepted") process.exit(105);
     // The resumed provider still needs a meaningful portion of its liveness interval to process
     // the answer before settling the already-admitted request.
     setTimeout(requestSettlement, 250);
     return;
   }
-  if (frame.requestId === "settle" && scenario === "provider_liveness_question_wait") {
+  if (frame.requestId === "settle" && isProviderLivenessQuestionAttempt()) {
     if (!frame.ok || frame.value?.protocol !== "koni.provider-request-settlement.v1")
       process.exit(106);
     // Keep the process attached so the test can inspect the settled request without introducing
@@ -526,7 +526,7 @@ function appendAssistant() {
       ? [{ type: "text", text: "x".repeat(1_100_000) }]
       : scenario === "context_window_headroom"
         ? [{ type: "text", text: "Inspecting the already-injected compiler context." }]
-        : scenario === "provider_liveness_question_wait"
+        : isProviderLivenessQuestionAttempt()
           ? [
               {
                 type: "toolCall",
@@ -845,6 +845,15 @@ function requestQuestion() {
       arguments: call.arguments,
     },
   });
+}
+
+function isProviderLivenessQuestionAttempt() {
+  return (
+    scenario === "provider_liveness_question_wait" ||
+    (scenario === "assignment_provider_liveness_question_wait" &&
+      launch.spec.identity.ticketId === "ticket-one" &&
+      launch.spec.lineage.branchEpoch === 0)
+  );
 }
 
 function terminalCallId() {
