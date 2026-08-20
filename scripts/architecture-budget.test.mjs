@@ -3,10 +3,120 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
 const sourceRoot = path.join(repositoryRoot, "packages/core/src");
 const defaultLineLimit = 2_500;
+
+const runProgramValueExports = [
+  "applyReviewEffects",
+  "approvedApplicationAuditSteering",
+  "approvedApplicationGraphOnlyReviewInstruction",
+  "approvedChangeObligationInstructions",
+  "approvedChangeObligationsForAttempt",
+  "approvedChangeObligationsForTargets",
+  "approvedProposalAttemptInstructions",
+  "approvedProposalAuditSteering",
+  "assertApprovedChangeRuntimeObligations",
+  "assertAssetGateContractsBoundToGraph",
+  "assertAssetImplementationObligationsPreserved",
+  "assertFailedReviewDoesNotContradictApprovedChangeRuntimeObligations",
+  "assertPlanningRepositoryPaths",
+  "assertRunPlanObligationsPreserved",
+  "assertRunPlanUsesRepositoryOwnedArgv",
+  "assertTicketDefinitionStable",
+  "assetImplementationFallbackEligible",
+  "assetImplementationFilesMaterialized",
+  "commandInfrastructureFailure",
+  "configuredCheckFailureInstructions",
+  "currentNonpassingGateRepairEvidenceRequests",
+  "downstreamGraphPublicationStepIds",
+  "effectiveAssignmentWriteScope",
+  "exhaustedSourceProposalInstructions",
+  "existingStandaloneSupportRunForUpstreamRequest",
+  "experimentBoundaryBlockedGateProviderNodeIds",
+  "gatePolicyCommandSubjectIds",
+  "gateProviderRepairScopeFallback",
+  "gateRepairEvidenceTargetNodeIds",
+  "gateRepairInstruction",
+  "generatedAssetImplementationReadPaths",
+  "generatedAssetRepairTicketId",
+  "graphDeltaReviewCandidateNodeIds",
+  "hasExistingAssetImplementationTicket",
+  "hasManifestScopedDirectGateRecheck",
+  "implementAssetReviewManifestInstruction",
+  "implementationWriteGrantInstructions",
+  "loadedSkillResourceFromReceipt",
+  "manifestScopedDirectGateRechecks",
+  "orderedReviewPredecessorStepIds",
+  "pendingPlannedAssetRepairRequestForNode",
+  "plannedAssetRepairHistoryForAttempt",
+  "plannedAssetRepairProposalTargetNodeIds",
+  "plannedAssetRepairRequestForNode",
+  "plannedAssetRepairRequestsForNode",
+  "rebindRuleEvidenceAcrossNonInterferingGraphChange",
+  "rebindRuleEvidenceAcrossStatusOnlyReviewEffects",
+  "reconcileNeverStartedTicketNodeScope",
+  "recurringAssetHasUnaddressedGateFailure",
+  "recurringAssetHasUnaddressedStandaloneRunFailure",
+  "recurringAssetRequiresReissue",
+  "recurringAssetReviewReworkPending",
+  "refreshHeldSourceTicketGrant",
+  "refreshSettledRecurringAssetTicketGrant",
+  "rejectedSourceProposalInstructions",
+  "remapPlanningSeedGateContractKeys",
+  "reopenCompletedRecurringAssetTicket",
+  "repairedProviderBlockedDirectGateNodeIds",
+  "repairedProviderDirectGateReadNodeIds",
+  "repairedProviderGateRecheckInstruction",
+  "replaceGateRunDefinitionsWithManifestRechecks",
+  "researchConstitutionRunPlanFallback",
+  "researchRunContractScopeFallback",
+  "researchStandaloneSupportRunFallback",
+  "resolveConfiguredOperationReference",
+  "resolvePinnedGateAutoEvaluationContexts",
+  "restoreSettledRecurringAssetTicket",
+  "reviewVerdictInstructions",
+  "routablePlannedAssetRepairProposalIds",
+  "routePlannedAssetRepairProposals",
+  "routeSupersededGateRunProposals",
+  "scientificRunTicketDefinitions",
+  "shouldAssertApprovedChangeRuntimeObligations",
+  "shouldAttachCurrentGateRepairEvidence",
+  "shouldAttachPredecessorExecution",
+  "standaloneSupportRunAllowsEmptyScientificInputs",
+  "standaloneSupportRunAssetNodeIds",
+  "standaloneSupportRunAssetRepairInstruction",
+  "standaloneSupportRunAssetRepairScopeFallback",
+  "standaloneSupportRunGateNodeIds",
+  "ticketBoardApplicableTicketDefinitions",
+  "ticketCreatedNodeIds",
+  "upstreamChangeRequestInstructions",
+  "verificationActionableTicketDefinitions",
+].sort();
+
+const runProgramTypeExports = [
+  "ApprovedChangeObligationContext",
+  "AssignmentTerminalPolicyProjection",
+  "AssignmentTerminalPolicyRetainedReceipt",
+  "AssignmentTerminalPolicySourceCommand",
+  "AssignmentTerminalPolicySourceManifestPair",
+  "AssignmentTerminalReplayCompilation",
+  "AssignmentTerminalValidationCheckPolicy",
+  "CurrentNonpassingGateRepairEvidenceRequest",
+  "NativeRuleAuthorityEvidenceRequest",
+  "NativeRunCompilerProgramOptions",
+  "PlannedAssetRepairHistoryEntry",
+  "PlannedAssetRepairRequest",
+].sort();
+
+const runProgramClassExports = ["NativeRunCompilerProgram", "NativeRunProgramError"].sort();
+const intendedRunProgramExports = [
+  ...runProgramValueExports,
+  ...runProgramTypeExports,
+  ...runProgramClassExports,
+].sort();
 
 const grandfatheredLineLimits = new Map([
   ["packages/core/src/authority/run-engine.ts", 19_864],
@@ -91,6 +201,85 @@ test("extracted leaf modules do not import their owning facade", async () => {
 
   assert.deepEqual(violations, [], violations.join("\n"));
 });
+
+test("run compiler facade and package root preserve the reviewed export surface", () => {
+  const configPath = path.join(repositoryRoot, "packages/core/tsconfig.json");
+  const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
+  assert.equal(configFile.error, undefined);
+  const config = ts.parseJsonConfigFileContent(configFile.config, ts.sys, path.dirname(configPath));
+  const program = ts.createProgram(config.fileNames, config.options);
+  const checker = program.getTypeChecker();
+  const runProgramExports = moduleExports(
+    program,
+    checker,
+    "packages/core/src/compiler/run-program.ts",
+  );
+  const packageRootExports = moduleExports(program, checker, "packages/core/src/index.ts");
+
+  assert.deepEqual([...runProgramExports.keys()].sort(), intendedRunProgramExports);
+  assert.deepEqual(
+    exportsWithIdentity(runProgramExports, checker, "value"),
+    runProgramValueExports,
+  );
+  assert.deepEqual(exportsWithIdentity(runProgramExports, checker, "type"), runProgramTypeExports);
+  assert.deepEqual(
+    exportsWithIdentity(runProgramExports, checker, "class"),
+    runProgramClassExports,
+  );
+
+  const runProgramFamilyAtPackageRoot = [...packageRootExports.entries()]
+    .filter(([, symbol]) => symbolComesFromRunProgramFamily(resolveAlias(symbol, checker)))
+    .map(([name]) => name)
+    .sort();
+  assert.deepEqual(runProgramFamilyAtPackageRoot, intendedRunProgramExports);
+
+  for (const name of intendedRunProgramExports) {
+    assert.strictEqual(
+      resolveAlias(packageRootExports.get(name), checker),
+      resolveAlias(runProgramExports.get(name), checker),
+      `${name} must preserve its run-program symbol identity at the package root`,
+    );
+  }
+});
+
+function moduleExports(program, checker, relativePath) {
+  const sourceFile = program.getSourceFile(path.join(repositoryRoot, relativePath));
+  assert.ok(sourceFile, `missing source file ${relativePath}`);
+  const moduleSymbol = checker.getSymbolAtLocation(sourceFile);
+  assert.ok(moduleSymbol, `missing module symbol ${relativePath}`);
+  return new Map(
+    checker.getExportsOfModule(moduleSymbol).map((symbol) => [symbol.getName(), symbol]),
+  );
+}
+
+function exportsWithIdentity(exports, checker, identity) {
+  return [...exports.entries()]
+    .filter(([, symbol]) => {
+      const flags = resolveAlias(symbol, checker).flags;
+      const hasValue = Boolean(flags & ts.SymbolFlags.Value);
+      const hasType = Boolean(flags & ts.SymbolFlags.Type);
+      if (identity === "class") return hasValue && hasType;
+      if (identity === "value") return hasValue && !hasType;
+      return hasType && !hasValue;
+    })
+    .map(([name]) => name)
+    .sort();
+}
+
+function resolveAlias(symbol, checker) {
+  assert.ok(symbol, "missing expected export symbol");
+  return symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+}
+
+function symbolComesFromRunProgramFamily(symbol) {
+  return Boolean(
+    symbol.declarations?.some((declaration) =>
+      /\/compiler\/run-(?:attempt-guidance|check-execution|check-resolution|graph-compilation|program(?:-contracts|-support)?)\.ts$/u.test(
+        declaration.getSourceFile().fileName,
+      ),
+    ),
+  );
+}
 
 async function listTypeScriptFiles(directory) {
   const output = [];

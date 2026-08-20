@@ -302,12 +302,81 @@ import {
   type PlannedAssetRepairRequest,
   type ResearchRunContractScopeGraph,
 } from "./run-program-support.js";
-export * from "./run-attempt-guidance.js";
-export * from "./run-check-execution.js";
-export * from "./run-check-resolution.js";
-export * from "./run-graph-compilation.js";
-export * from "./run-program-contracts.js";
-export * from "./run-program-support.js";
+export {
+  approvedApplicationAuditSteering,
+  approvedApplicationGraphOnlyReviewInstruction,
+  approvedChangeObligationInstructions,
+  approvedChangeObligationsForAttempt,
+  approvedChangeObligationsForTargets,
+  approvedProposalAttemptInstructions,
+  approvedProposalAuditSteering,
+  assertApprovedChangeRuntimeObligations,
+  assertFailedReviewDoesNotContradictApprovedChangeRuntimeObligations,
+  configuredCheckFailureInstructions,
+  downstreamGraphPublicationStepIds,
+  effectiveAssignmentWriteScope,
+  exhaustedSourceProposalInstructions,
+  gateRepairInstruction,
+  implementAssetReviewManifestInstruction,
+  implementationWriteGrantInstructions,
+  loadedSkillResourceFromReceipt,
+  orderedReviewPredecessorStepIds,
+  rejectedSourceProposalInstructions,
+  repairedProviderGateRecheckInstruction,
+  resolvePinnedGateAutoEvaluationContexts,
+  reviewVerdictInstructions,
+  shouldAssertApprovedChangeRuntimeObligations,
+  shouldAttachPredecessorExecution,
+  standaloneSupportRunAssetRepairInstruction,
+  upstreamChangeRequestInstructions,
+} from "./run-attempt-guidance.js";
+export type { ApprovedChangeObligationContext } from "./run-attempt-guidance.js";
+export {
+  commandInfrastructureFailure,
+  rebindRuleEvidenceAcrossNonInterferingGraphChange,
+  rebindRuleEvidenceAcrossStatusOnlyReviewEffects,
+} from "./run-check-execution.js";
+export {
+  gatePolicyCommandSubjectIds,
+  standaloneSupportRunAllowsEmptyScientificInputs,
+} from "./run-check-resolution.js";
+export {
+  applyReviewEffects,
+  assertAssetImplementationObligationsPreserved,
+  assertRunPlanObligationsPreserved,
+  assertRunPlanUsesRepositoryOwnedArgv,
+  graphDeltaReviewCandidateNodeIds,
+  remapPlanningSeedGateContractKeys,
+  ticketCreatedNodeIds,
+} from "./run-graph-compilation.js";
+export { NativeRunProgramError } from "./run-program-contracts.js";
+export type {
+  AssignmentTerminalPolicyProjection,
+  AssignmentTerminalPolicyRetainedReceipt,
+  AssignmentTerminalPolicySourceCommand,
+  AssignmentTerminalPolicySourceManifestPair,
+  AssignmentTerminalReplayCompilation,
+  AssignmentTerminalValidationCheckPolicy,
+  NativeRuleAuthorityEvidenceRequest,
+  NativeRunCompilerProgramOptions,
+} from "./run-program-contracts.js";
+export {
+  assetImplementationFilesMaterialized,
+  experimentBoundaryBlockedGateProviderNodeIds,
+  generatedAssetImplementationReadPaths,
+  generatedAssetRepairTicketId,
+  hasExistingAssetImplementationTicket,
+  pendingPlannedAssetRepairRequestForNode,
+  plannedAssetRepairRequestsForNode,
+  recurringAssetHasUnaddressedGateFailure,
+  recurringAssetHasUnaddressedStandaloneRunFailure,
+  recurringAssetRequiresReissue,
+  recurringAssetReviewReworkPending,
+  routablePlannedAssetRepairProposalIds,
+  standaloneSupportRunAssetNodeIds,
+  standaloneSupportRunGateNodeIds,
+} from "./run-program-support.js";
+export type { PlannedAssetRepairRequest } from "./run-program-support.js";
 export class NativeRunCompilerProgram implements RunCompilerProgram {
   readonly #projectRoot: string;
   #packageBaseline: VerifiedProfileBaseline;
