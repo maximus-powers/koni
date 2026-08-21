@@ -23,6 +23,19 @@ that same full surface in an explicitly chosen terminal.
 Koni needs no separate credential setup. Authenticate ordinary Pi only when a chosen provider-backed
 run requires it.
 
+The v1 release qualification is deliberately narrower than the configurable product surface. Use
+Node 22.19 or 24 on a trusted macOS repository and assign `openai-codex/gpt-5.6-luna` with medium
+thinking and no fallback to every persona when you need to stay inside the qualified autonomous
+boundary. Other Pi models remain selectable, but they are not covered by that release evidence.
+Ubuntu participates in repository and containment gates; it is not a supported networked inference
+target.
+
+Treat autonomy as supervised execution between explicit operator boundaries. Start the run yourself,
+review and approve its compiled plan, keep `/koni`, `koni tui`, or an explicit supervision driver
+active, answer material questions, and inspect receipts and diffs before separately authorizing
+promotion. Pause, stop, restart, and explicit resume preserve known durable state. If Koni reports
+an unknown recovery condition, stop and reconcile it instead of editing authority state by hand.
+
 Core stores authority state in the Git common directory, so it requires an existing Git worktree
 even for profile installation. In a brand-new directory, run `git init` before
 `koni init coding|research`. Initialization still creates no run and no commit.

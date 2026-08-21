@@ -12,14 +12,19 @@ permissions:
 
 jobs:
   validate:
+    name: Validate / Node ${{ matrix.node }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22.19.0, 24]
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22.19.0
+          node-version: ${{ matrix.node }}
           cache: npm
       - run: npm install --global npm@11.13.0
       - run: sudo apt-get update && sudo apt-get install -y bubblewrap
@@ -40,6 +45,8 @@ jobs:
           path: koni-pi-host-compatibility.json
 
   package:
+    # Package once on the minimum supported runtime after both supported Node lines validate the
+    # same source. The release archives contain portable JavaScript, not runtime-specific binaries.
     needs: validate
     runs-on: ubuntu-latest
     steps:

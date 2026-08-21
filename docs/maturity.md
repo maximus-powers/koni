@@ -4,13 +4,13 @@ The shipping candidate is `@koni/core@1.0.0` plus the Coding and Research profil
 them are implemented in TypeScript on Pi 0.80.10. Versioned package and profile protocols, and
 baseline and overlay upgrades, define compatibility.
 
-## Current candidate (2026-07-17)
+## Current candidate (2026-08-20)
 
 | Area                               | Current source                                                                         |
 | ---------------------------------- | -------------------------------------------------------------------------------------- |
 | Public product packages            | `@koni/core`, `@koni/coding-profile`, `@koni/research-profile`                         |
 | Authority implementation           | Pure TypeScript Core                                                                   |
-| Runtime compatibility              | Node `>=22.19`, Pi `0.80.10`, TypeBox `1.1.38`                                         |
+| Runtime compatibility              | Declared Node `>=22.19`; qualified on `22.19` and `24`; Pi `0.80.10`, TypeBox `1.1.38` |
 | Credentials and model providers    | Ordinary Pi ownership. Koni has no second login or credential store                    |
 | Profiles and project customization | Immutable package baseline plus preserved `.koni` project overlay                      |
 | Upstream conflicts                 | Explicit current and upstream comparison with revisioned resolution                    |
@@ -23,14 +23,22 @@ Trusted initialized Pi TUI projects also get `/koni-run`, `/koni-runs`, and an a
 read-only widget. Passive attachment cannot start work. Only explicit commands cross the authority
 mutation boundary.
 
-The product suits supervised evaluation on repositories with backups and normal review discipline.
-Pi extensions are trusted user code rather than a sandbox. Koni's meaningful autonomous effects
-still pass through compiler grants, durable CAS and replay checks, contained command execution, and
-explicit Git transactions.
+The v1 qualification boundary is operator-started autonomous Coding and Research work on trusted
+macOS repositories. The qualifying model policy uses `openai-codex/gpt-5.6-luna` with medium
+thinking for every persona and no fallback. That fixed policy is release evidence, not a claim that
+all Pi providers or models behave equivalently. Pi extensions are trusted user code rather than a
+sandbox. Koni's meaningful autonomous effects still pass through compiler grants, durable CAS and
+replay checks, contained command execution, and explicit Git transactions.
 
-Use Köni today for evaluation, profile development, and supervised work on repositories with good
-backups and review discipline. Do not treat the current release as an unattended production
-scheduler or as a security boundary for untrusted code.
+Within that boundary, autonomous means Koni may schedule and run approved agent work without
+step-by-step steering. It does not mean unattended operation. An operator starts the run, answers
+material questions, approves the compiled plan, keeps the TUI or an explicit supervision driver
+active, handles unknown recovery states, inspects the final receipts and diff, and separately
+authorizes promotion.
+
+Use Köni for operator-supervised autonomous work on repositories with good backups and normal review
+discipline. Do not treat the current release as an unattended production scheduler, a security
+boundary for untrusted code, or a guarantee about a project's methodology or result quality.
 
 ## Current capability
 
@@ -133,6 +141,11 @@ destination-allowlisted egress broker replaces the denied network namespace. Ins
 use, profile updates, and any live acceptance run each require separate guarded authorization. No
 existing installed project is refreshed implicitly. Preview a profile update, review its retirement
 plan, and apply only with a release that publishes the complete provenance and verification record.
+
+Repository gates run on macOS and Ubuntu with Node 22.19 and 24. This cross-platform matrix covers
+compilation, deterministic authority behavior, package installation, TUI components, and the
+platform containment boundary. It does not convert Ubuntu into a supported networked inference
+target; Linux provider egress remains fail-closed as described above.
 
 ## Safety posture
 
