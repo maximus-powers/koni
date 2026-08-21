@@ -15,7 +15,6 @@ import {
 import { createKoniCoreExtension } from "../src/extension.js";
 import { AuthorityServer } from "../src/authority/server.js";
 import {
-  authorityDaemonEnvironment,
   createProjectRun,
   ensureProjectAuthority,
   launchAuthorityDaemon,
@@ -23,6 +22,7 @@ import {
   serveProjectAuthority,
   stopAuthorityWhenInstallationSuperseded,
 } from "../src/operator/authority-bootstrap.js";
+import { authorityDaemonEnvironment } from "../src/operator/authority-daemon-environment.js";
 import type { RunRecord } from "../src/state/run-record.js";
 import { createRunFromPi, projectPiModels } from "../src/operator/control-center-host.js";
 import {

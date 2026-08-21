@@ -54,6 +54,7 @@ import {
   type ActiveInstallationBinding,
   waitForActiveInstallationSupersession,
 } from "../runtime/active-installation.js";
+import { authorityDaemonEnvironment } from "./authority-daemon-environment.js";
 
 // A first launch from an exact packed Pi installation has to materialize and verify the complete
 // content-addressed runtime stage before the authority may bind its socket. Cold filesystems and
@@ -606,36 +607,6 @@ export async function launchAuthorityDaemon(input: {
   );
   child.unref();
   return { ...(child.pid === undefined ? {} : { pid: child.pid }), exited };
-}
-
-/** @internal Exported only for a mutation-catching process-boundary regression. */
-export function authorityDaemonEnvironment(
-  piEnvironment: Readonly<Record<string, string>>,
-  providerFreeAdmissionProbe = false,
-): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = {
-    ...process.env,
-    ...piEnvironment,
-    KONI_AUTHORITY_DAEMON: "1",
-    ...(providerFreeAdmissionProbe
-      ? {
-          KONI_PROVIDER_FREE_RELEASE_PROBE: "1",
-          NODE_ENV: "test",
-          PI_OFFLINE: "1",
-        }
-      : {}),
-  };
-  // The exact peer bridge is an argv preload above. Never forward ambient Node injection into the
-  // authority process, even when the interactive launcher itself was started through NODE_OPTIONS.
-  for (const name of [
-    "NODE_OPTIONS",
-    "NODE_PATH",
-    "NPM_CONFIG_NODE_OPTIONS",
-    "NODE_INSPECT_RESUME_ON_START",
-  ]) {
-    delete environment[name];
-  }
-  return environment;
 }
 
 /**
