@@ -282,6 +282,11 @@ test(
       await writeAmbientResources(agent, ambientPackage, wrapper);
       const gitPackageFixture = await createHermeticSuperpowersGitFixture(root);
       const ambientBefore = await snapshotAmbient(agent, ambientPackage);
+      assert.equal(
+        ambientBefore.modelsStore,
+        Buffer.from("{}", "utf8").toString("base64"),
+        "the release rehearsal must establish an unmodified offline model-store baseline",
+      );
       const piEnvironment = providerFreeEnvironment({
         HOME: home,
         PI_CODING_AGENT_DIR: agent,
@@ -301,6 +306,7 @@ test(
           ),
         ),
       });
+      const offlinePiEnvironment = { ...piEnvironment, PI_OFFLINE: "1" };
 
       // Koni's two ordinary runtime dependencies are packed from this repository's exact installed
       // development closure and seeded into Pi's owned package root. The release archives remain
@@ -323,7 +329,7 @@ test(
       for (const [name, value] of archives) {
         await execFileAsync(pi, ["install", `npm:${name}@${value.version}`], {
           cwd: project,
-          env: piEnvironment,
+          env: offlinePiEnvironment,
         });
       }
       await assertManagedInstall(agent, archives);
@@ -342,11 +348,9 @@ test(
         "Pi's one managed closure must expose the manual koni command",
       );
       const launcherEnvironment = {
-        ...piEnvironment,
-        // Exact Git installation is complete before provider-free Koni processes start. Restore
-        // stock Pi's offline boundary so authorities, TUIs, and duplicate-source diagnostics cannot
-        // refresh model/provider state while still reusing the already-resolved project package.
-        PI_OFFLINE: "1",
+        ...offlinePiEnvironment,
+        // Keep ordinary launchers, authorities, TUIs, and duplicate-source diagnostics inside stock
+        // Pi's offline boundary. Exact Git resolution receives its own narrower environment below.
         PATH: `${path.dirname(launcher)}${path.delimiter}${path.dirname(pi)}${path.delimiter}${piEnvironment.PATH ?? ""}`,
       };
       const commandName = process.platform === "win32" ? "koni.cmd" : "koni";
@@ -388,7 +392,20 @@ test(
       // Exercise the operator-facing package path before the slower registrar/race matrices so a
       // release UI failure remains quick to diagnose. The provider-free daemon is then quiesced; its
       // paused durable run remains available for the later preservation and uninstall assertions.
-      await exerciseInstalledPiResources({ pi, project, agent, environment: piEnvironment });
+      await exerciseInstalledPiResources({
+        pi,
+        project,
+        agent,
+        environment: offlinePiEnvironment,
+      });
+      await resolveInstalledPiResources({
+        stockPiRoot,
+        agent,
+        project,
+        root,
+        environment: piEnvironment,
+      });
+      await assertHermeticSuperpowersResolution(project);
       assert.deepEqual(
         JSON.parse(await readFile(path.join(project, ".pi", "settings.json"), "utf8")).packages,
         [superpowersPackageSource],
@@ -558,7 +575,7 @@ test(
         ambientPackage,
         ambientBefore,
         archives,
-        environment: piEnvironment,
+        environment: offlinePiEnvironment,
       });
     } finally {
       await stopDisposableAuthority(project);
@@ -722,6 +739,7 @@ async function assertOrdinaryNpmDoesNotInstallHostPeers({
     env: providerFreeEnvironment({
       HOME: home,
       PATH: `${path.dirname(pi)}${path.delimiter}${process.env.PATH ?? ""}`,
+      PI_OFFLINE: "1",
     }),
   });
   assert.equal(result.stdout.trim(), archives.get("@koni/core").version);
