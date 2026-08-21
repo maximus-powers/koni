@@ -21,6 +21,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { providerFreeEnvironment } from "./provider-free-environment.mjs";
 
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -4084,19 +4085,6 @@ async function uninstallKoniPackages({
       else child.once("exit", resolve);
     });
   }
-}
-
-function providerFreeEnvironment(overrides) {
-  const environment = { ...process.env, ...overrides };
-  for (const name of Object.keys(environment)) {
-    if (environment[name] === undefined) {
-      delete environment[name];
-      continue;
-    }
-    if (/(?:API[_-]?KEY|ACCESS[_-]?TOKEN|AUTH[_-]?TOKEN|SECRET[_-]?KEY)$/iu.test(name))
-      delete environment[name];
-  }
-  return environment;
 }
 
 async function stopDisposableAuthority(project) {
