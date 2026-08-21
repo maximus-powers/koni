@@ -3590,7 +3590,7 @@ process.stdout.write(JSON.stringify(resolved.skills.map((skill) => skill.name).s
   );
   const result = await execFileAsync(process.execPath, [helper], {
     cwd: project,
-    env: environment,
+    env: { ...environment, NODE_ENV: "test" },
     timeout: 30_000,
     maxBuffer: 8 * 1024 * 1024,
   });
