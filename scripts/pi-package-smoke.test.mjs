@@ -3704,6 +3704,9 @@ export default function legacyKoniCore(pi) {
     env: { ...environment, NODE_ENV: "test" },
     stdio: ["pipe", "pipe", "pipe"],
   });
+  const childClosed = new Promise((resolve) => {
+    child.once("close", resolve);
+  });
   let stdout = "";
   let stderr = "";
   child.stdout.setEncoding("utf8");
@@ -3773,10 +3776,10 @@ export default function legacyKoniCore(pi) {
   } finally {
     child.stdin.end();
     if (child.exitCode === null) child.kill("SIGTERM");
-    await new Promise((resolve) => {
-      if (child.exitCode !== null) resolve();
-      else child.once("exit", resolve);
-    });
+    // `exit` can precede stdio closure when a child-owned descendant still has inherited handles.
+    // Await `close` so the ambient-state assertion observes the whole process lifetime rather than
+    // racing a delayed Pi/Koni writer after its direct parent has exited.
+    await childClosed;
   }
   assert.deepEqual(
     await snapshotTree(agent),
