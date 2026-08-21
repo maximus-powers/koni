@@ -7461,6 +7461,72 @@ describe("native compiler-authoritative run program", () => {
     });
   });
 
+  it("rejects preserved proof inputs that overlap covered or implementation-writable product paths", async () => {
+    const project = await installedProject("coding-profile");
+    await mkdir(path.join(project.projectRoot, "src"), { recursive: true });
+    await mkdir(path.join(project.projectRoot, "tests"), { recursive: true });
+    await mkdir(path.join(project.projectRoot, "test-support"), { recursive: true });
+    await writeFile(
+      path.join(project.projectRoot, "src/feature.ts"),
+      "export const label = 'legacy';\n",
+    );
+    await writeFile(
+      path.join(project.projectRoot, "tests/feature.test.mjs"),
+      "process.exitCode = 1;\n",
+    );
+    await writeFile(
+      path.join(project.projectRoot, "test-support/vitest.config.ts"),
+      "export default { test: { environment: 'node' } };\n",
+    );
+    git(project.projectRoot, ["add", "src", "tests", "test-support"]);
+    git(project.projectRoot, ["commit", "-m", "fixture impossible proof seam"]);
+    const objective = "Reject an impossible proof source-preservation boundary";
+
+    for (const [suffix, output, diagnostic] of [
+      [
+        "covered",
+        proofPreparationPlanningOutput({ proofSupportPaths: ["src/feature.ts"] }),
+        /support_paths.*must be disjoint.*covered_paths/u,
+      ],
+      [
+        "owned",
+        proofPreparationPlanningOutput({
+          changeOwnedPaths: ["src/feature.ts", "test-support/vitest.config.ts"],
+        }),
+        /implementation-proof-support.*authority-disjoint/u,
+      ],
+      [
+        "source-owned",
+        proofPreparationPlanningOutput({
+          changeOwnedPaths: ["src/feature.ts", "tests/feature.test.mjs"],
+        }),
+        /implementation-proof-source.*authority-disjoint/u,
+      ],
+    ] as const) {
+      const runId = `run-proof-support-overlap-${suffix}`;
+      const resolved = await compilerProgram(project).then((program) =>
+        program.resolveRun({
+          runId,
+          objective,
+          runTypeId: "small",
+          targetRef: "refs/heads/main",
+          intake: { goal: objective },
+        }),
+      );
+      await persistWrites(project.projectRoot, resolved.artifactWrites ?? []);
+      const run = runRecord(project.projectRoot, runId, objective, resolved);
+      const program = await compilerProgram(project);
+
+      await expect(
+        program.compilePlanningOutput({
+          run,
+          attemptId: `attempt-proof-support-overlap-${suffix}`,
+          output,
+        }),
+      ).rejects.toThrow(diagnostic);
+    }
+  });
+
   it("advances an exact reviewed proof preparation without reissuing the preparation ticket", async () => {
     const project = await installedProject("coding-profile");
     await mkdir(path.join(project.projectRoot, "src"), { recursive: true });
@@ -11735,7 +11801,13 @@ function planningOutput(
   };
 }
 
-function proofPreparationPlanningOutput(): unknown {
+function proofPreparationPlanningOutput(
+  options: {
+    changeOwnedPaths?: string[];
+    proofSourcePaths?: string[];
+    proofSupportPaths?: string[];
+  } = {},
+): unknown {
   return {
     ...(planningOutput({ work_kind: "new_feature" }) as Record<string, unknown>),
     graphSeed: {
@@ -11778,7 +11850,7 @@ function proofPreparationPlanningOutput(): unknown {
           spec: {
             current_state: "Only the legacy behavior exists.",
             target_state: "The legacy identity and new behavior coexist.",
-            owned_paths: ["src/feature.ts"],
+            owned_paths: options.changeOwnedPaths ?? ["src/feature.ts"],
             blast_radius: "One focused source module.",
             risk_factors: ["The legacy identity could be replaced."],
             proof_strategy: "red_green",
@@ -11799,9 +11871,9 @@ function proofPreparationPlanningOutput(): unknown {
             command: ["node", "tests/feature.test.mjs"],
             working_directory: ".",
             baseline_check_id: "proof-expected-red",
-            source_paths: ["tests/feature.test.mjs"],
+            source_paths: options.proofSourcePaths ?? ["tests/feature.test.mjs"],
             covered_paths: ["src/feature.ts"],
-            support_paths: ["test-support/vitest.config.ts"],
+            support_paths: options.proofSupportPaths ?? ["test-support/vitest.config.ts"],
             oracle_cases: [
               {
                 id: "compatible_field",

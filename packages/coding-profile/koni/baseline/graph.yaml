@@ -447,7 +447,8 @@ node_types:
       items:
         type: path
         required: true
-      description: Exact existing read-only repository files needed to construct and execute the proof honestly but not claimed as product coverage, such as the owning package manifest, test-runner configuration, TypeScript configuration, setup file, or one established neighboring test pattern. These paths grant no write authority and must never be used to smuggle additional product scope into the proof.
+      disjoint_from: spec.covered_paths
+      description: Exact existing read-only repository files needed to construct and execute the proof honestly but not claimed as product coverage, such as the owning package manifest, test-runner configuration, TypeScript configuration, setup file, or one established neighboring test pattern. These paths are byte-preserved proof inputs, grant no write authority, and must stay authority-disjoint from covered product paths and every active implementation subject's writable paths.
     oracle_cases:
       type: list
       required: true
@@ -2851,3 +2852,38 @@ graph_constraints:
     - proof
     field: spec.source_paths
   distinct_nodes: true
+# Historical proof source and support bytes are global immutable inputs while their subjects remain
+# active. A concurrent change or migration must not receive authority to invalidate another proof's
+# retained baseline merely because the graph omitted a semantic edge between them.
+- id: implementation-proof-source-and-product-write-paths-authority-disjoint
+  kind: path_sets_disjoint
+  left:
+    select: well_scoped_implementation_proofs
+    node_types:
+    - proof
+    field: spec.source_paths
+  right:
+    select:
+      union:
+      - active_changes
+      - active_migrations
+    node_types:
+    - change
+    - migration
+    field: spec.owned_paths
+- id: implementation-proof-support-and-product-write-paths-authority-disjoint
+  kind: path_sets_disjoint
+  left:
+    select: well_scoped_implementation_proofs
+    node_types:
+    - proof
+    field: spec.support_paths
+  right:
+    select:
+      union:
+      - active_changes
+      - active_migrations
+    node_types:
+    - change
+    - migration
+    field: spec.owned_paths
