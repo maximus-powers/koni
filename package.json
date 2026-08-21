@@ -30,7 +30,7 @@
     "test:profiles": "node --test scripts/profile-bundles.test.mjs",
     "test:pi-host-boundary": "node --test scripts/pi-host-boundary.test.mjs",
     "test:pi-package": "npm run build --workspace @koni/core && node --test scripts/pi-package-smoke.test.mjs",
-    "check": "npm run lint && npm run lint:shell && npm run format:check && node --test scripts/check-brand.test.mjs scripts/provider-free-environment.test.mjs scripts/release-workflow.test.mjs && npm run check:brand && npm run test:docs && npm run test:architecture && npm run test:profiles && npm run test:pi-host-boundary && node --test scripts/clean-package-build.test.mjs && npm run check --workspaces --if-present && node --test scripts/pi-package-smoke.test.mjs",
+    "check": "npm run lint && npm run lint:shell && npm run format:check && node --test scripts/check-brand.test.mjs scripts/pi-git-package-resolution.test.mjs scripts/provider-free-environment.test.mjs scripts/release-workflow.test.mjs && npm run check:brand && npm run test:docs && npm run test:architecture && npm run test:profiles && npm run test:pi-host-boundary && node --test scripts/clean-package-build.test.mjs && npm run check --workspaces --if-present && node --test scripts/pi-package-smoke.test.mjs",
     "profiles:capture": "node scripts/capture-profile-bundles.mjs --publish-current"
   },
   "devDependencies": {
