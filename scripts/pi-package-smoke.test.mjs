@@ -401,7 +401,7 @@ test(
         agent,
         project,
         root,
-        environment: { ...launcherEnvironment, KONI_PI_PACKAGE_ROOT: piPackageRoot },
+        environment: { ...piEnvironment, KONI_PI_PACKAGE_ROOT: piPackageRoot },
       });
       await commitDisposableKoniConfiguration(
         project,
@@ -2983,6 +2983,14 @@ const agent = ${JSON.stringify(agent)};
 const coreRoot = ${JSON.stringify(coreRoot)};
 const objective = "Package smoke background run";
 assert.equal(process.env.NODE_ENV, "test");
+assert.equal(process.env.PI_OFFLINE, undefined);
+const settingsManager = SettingsManager.create(project, agent, { projectTrusted: true });
+const resourceLoader = new DefaultResourceLoader({ cwd: project, agentDir: agent, settingsManager });
+await resourceLoader.reload({ resolveProjectTrust: async () => true });
+// Stock Pi needs its normal resolver semantics to materialize the exact configured Git package.
+// Seal the process immediately after that boundary and before any Koni authority or session starts.
+process.env.PI_OFFLINE = "1";
+assert.equal(process.env.PI_OFFLINE, "1");
 const launched = await launchAuthorityDaemon({
   projectRoot: project,
   version: KONI_CORE_API_VERSION,
@@ -3021,9 +3029,6 @@ try {
 }
 assert.ok(authority, "packaged provider-free authority never became reachable");
 
-const settingsManager = SettingsManager.create(project, agent, { projectTrusted: true });
-const resourceLoader = new DefaultResourceLoader({ cwd: project, agentDir: agent, settingsManager });
-await resourceLoader.reload({ resolveProjectTrust: async () => true });
 const modelRuntime = await ModelRuntime.create({
   authPath: ${JSON.stringify(path.join(root, "isolated-command-harness-auth.json"))},
   modelsPath: null,
