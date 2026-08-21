@@ -7,7 +7,7 @@ tracked_paths=(
 forbidden_repo="real""-nigga-harness"
 legacy_product="pytha""goras"
 
-if git grep -n -i -e "$forbidden_repo" "${tracked_paths[@]}"; then
+if git --no-pager grep -n -i -e "$forbidden_repo" "${tracked_paths[@]}"; then
   echo "error: forbidden pre-release repository name remains" >&2
   exit 1
 fi
@@ -24,7 +24,7 @@ if [[ -n "$legacy_paths" ]]; then
   exit 1
 fi
 
-if git grep -n -i -e "$legacy_product" "${tracked_paths[@]}"; then
+if git --no-pager grep -n -i -e "$legacy_product" "${tracked_paths[@]}"; then
   echo "error: legacy product name remains" >&2
   exit 1
 fi
