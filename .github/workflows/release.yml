@@ -39,11 +39,6 @@ jobs:
           npm run build
           node --test scripts/pi-host-boundary.test.mjs
           node scripts/check-pi-host-boundary.mjs --output koni-pi-host-compatibility.json
-      - uses: actions/upload-artifact@v4
-        with:
-          name: validated-source
-          path: koni-pi-host-compatibility.json
-
   package:
     # Package once on the minimum supported runtime after both supported Node lines validate the
     # same source. The release archives contain portable JavaScript, not runtime-specific binaries.
