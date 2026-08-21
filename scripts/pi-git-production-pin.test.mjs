@@ -9,6 +9,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { providerFreeEnvironment } from "./provider-free-environment.mjs";
 import {
+  encodePiResolvedSkills,
+  PI_RESOLVED_SKILLS_MARKER,
+  parsePiResolvedSkills,
+} from "./pi-resolver-output.mjs";
+import {
   materializePinnedSuperpowersRepository,
   pinnedSuperpowersFixture,
 } from "./superpowers-pinned-fixture.mjs";
@@ -23,6 +28,16 @@ const piPackageRoot = path.join(
 );
 const productionUrl = "https://github.com/obra/superpowers";
 const productionSource = `git:github.com/obra/superpowers@${pinnedSuperpowersFixture.commit}`;
+
+test("the Pi resolver output contract ignores status lines but requires its exact marker", () => {
+  const paths = ["/fixture/skills/a/SKILL.md", "/fixture/skills/b/SKILL.md"];
+  assert.deepEqual(parsePiResolvedSkills(`up to date\n${encodePiResolvedSkills(paths)}`), paths);
+  assert.throws(() => parsePiResolvedSkills(JSON.stringify(paths)), /marker/u);
+  assert.throws(
+    () => parsePiResolvedSkills(`${encodePiResolvedSkills(paths)}\ntrailing`),
+    /payload/u,
+  );
+});
 const unpinnedProductionSource = "git:github.com/obra/superpowers";
 
 test("the materialized production remote keeps the reviewed object off its decoy default", async (context) => {
@@ -161,7 +176,7 @@ test("Pi resolves and reconciles the exact production Superpowers object without
   });
   const clone = path.join(project, ".pi", "git", "github.com", "obra", "superpowers");
   assert.deepEqual(
-    JSON.parse(fresh.stdout.slice(fresh.stdout.lastIndexOf("__KONI_SKILLS__") + 15)),
+    parsePiResolvedSkills(fresh.stdout),
     pinnedSuperpowersFixture.skills.map((id) => path.join(clone, "skills", id, "SKILL.md")),
   );
   assert.equal(
@@ -250,7 +265,7 @@ const manager = new DefaultPackageManager({ cwd: project, agentDir: agent, setti
 if (process.argv[2] === "update") await manager.update(source);
 const resolved = await manager.resolve();
 if (process.argv[2] === "resolve") {
-  process.stdout.write("__KONI_SKILLS__" + JSON.stringify(resolved.skills.map(({ path }) => path).sort()));
+  process.stdout.write(${JSON.stringify(PI_RESOLVED_SKILLS_MARKER)} + JSON.stringify(resolved.skills.map(({ path }) => path).sort()));
 }
 `,
   );

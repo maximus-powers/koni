@@ -22,6 +22,7 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { providerFreeEnvironment } from "./provider-free-environment.mjs";
+import { PI_RESOLVED_SKILLS_MARKER, parsePiResolvedSkills } from "./pi-resolver-output.mjs";
 import {
   materializePinnedSuperpowersRepository,
   pinnedSuperpowersFixture,
@@ -3649,7 +3650,7 @@ assert.deepEqual(
   [{ source: ${JSON.stringify(superpowersPackageSource)}, scope: "project" }],
 );
 const resolved = await packageManager.resolve();
-process.stdout.write(JSON.stringify(resolved.skills.map(({ path }) => path).sort()));
+process.stdout.write(${JSON.stringify(PI_RESOLVED_SKILLS_MARKER)} + JSON.stringify(resolved.skills.map(({ path }) => path).sort()));
 `,
     "utf8",
   );
@@ -3665,7 +3666,7 @@ process.stdout.write(JSON.stringify(resolved.skills.map(({ path }) => path).sort
     "stock Pi package resolution must not initialize or refresh the unrelated model store",
   );
   const clone = path.join(project, ".pi", "git", "github.com", "obra", "superpowers");
-  const resolvedSkillPaths = JSON.parse(result.stdout);
+  const resolvedSkillPaths = parsePiResolvedSkills(result.stdout);
   assert.deepEqual(
     resolvedSkillPaths.filter((skillPath) => skillPath.startsWith(`${clone}${path.sep}`)),
     offlineSuperpowersSkillIds.map((id) => path.join(clone, "skills", id, "SKILL.md")),
