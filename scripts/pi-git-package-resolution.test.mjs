@@ -52,12 +52,17 @@ test("Pi 0.80.10 resolves and reconciles a raw-OID Git package without network",
     `${JSON.stringify({ packages: [source] })}\n`,
   );
   const helper = await writeResolverHelper(root, { project, agent, source });
-  const environment = providerFreeEnvironment({
-    GIT_CONFIG_GLOBAL: fixture.config,
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_TERMINAL_PROMPT: "0",
-    NODE_ENV: "test",
-  });
+  const environment = providerFreeEnvironment(
+    {
+      GIT_CONFIG_GLOBAL: fixture.config,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+      NODE_ENV: "test",
+      PI_OFFLINE: undefined,
+    },
+    { ...process.env, PI_OFFLINE: "1" },
+  );
+  assert.equal(environment.PI_OFFLINE, undefined);
 
   const fresh = await execFileAsync(process.execPath, [helper, "resolve"], {
     cwd: project,
