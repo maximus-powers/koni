@@ -7517,6 +7517,14 @@ describe("native compiler-authoritative run program", () => {
         }),
         /implementation-proof-support.*authority-disjoint/u,
       ],
+      [
+        "migration-source-owned",
+        proofPreparationPlanningOutput({
+          implementationSubject: "migration",
+          migrationOwnedPaths: ["src/feature.ts", "tests/feature.test.mjs"],
+        }),
+        /implementation-proof-source.*authority-disjoint/u,
+      ],
     ] as const) {
       const runId = `run-proof-support-overlap-${suffix}`;
       const resolved = await program.resolveRun({
@@ -7570,6 +7578,7 @@ describe("native compiler-authoritative run program", () => {
       nodes: readonly GraphNode[],
       type: "change" | "migration",
       status: string,
+      dimension: "source" | "support",
     ): TypedGraph =>
       new TypedGraph(
         schema,
@@ -7580,7 +7589,12 @@ describe("native compiler-authoritative run program", () => {
                 status,
                 spec: {
                   ...structuredClone(node.spec),
-                  owned_paths: ["src/feature.ts", "test-support/vitest.config.ts"],
+                  owned_paths: [
+                    "src/feature.ts",
+                    dimension === "source"
+                      ? "tests/feature.test.mjs"
+                      : "test-support/vitest.config.ts",
+                  ],
                 },
               }
             : node,
@@ -7589,37 +7603,29 @@ describe("native compiler-authoritative run program", () => {
       );
 
     const changeNodes = await compiledNodes("change", "change");
-    expect(() =>
-      validateConfiguredGraphConstraints(
-        compiled.value,
-        graphAtStatus(changeNodes, "change", "implemented"),
-        project.projectRoot,
-      ),
-    ).toThrow(/implementation-proof-support.*authority-disjoint/u);
-    expect(() =>
-      validateConfiguredGraphConstraints(
-        compiled.value,
-        graphAtStatus(changeNodes, "change", "superseded"),
-        project.projectRoot,
-      ),
-    ).not.toThrow();
-
     const migrationNodes = await compiledNodes("migration", "migration");
-    expect(() =>
-      validateConfiguredGraphConstraints(
-        compiled.value,
-        graphAtStatus(migrationNodes, "migration", "complete"),
-        project.projectRoot,
-      ),
-    ).toThrow(/implementation-proof-support.*authority-disjoint/u);
-    for (const status of ["rolled_back", "superseded"] as const) {
-      expect(() =>
-        validateConfiguredGraphConstraints(
-          compiled.value,
-          graphAtStatus(migrationNodes, "migration", status),
-          project.projectRoot,
-        ),
-      ).not.toThrow();
+    for (const [nodes, type, status, rejected] of [
+      [changeNodes, "change", "implemented", true],
+      [changeNodes, "change", "superseded", false],
+      [migrationNodes, "migration", "complete", true],
+      [migrationNodes, "migration", "rolled_back", false],
+      [migrationNodes, "migration", "superseded", false],
+    ] as const) {
+      for (const dimension of ["source", "support"] as const) {
+        const validate = (): void =>
+          validateConfiguredGraphConstraints(
+            compiled.value,
+            graphAtStatus(nodes, type, status, dimension),
+            project.projectRoot,
+          );
+        if (rejected) {
+          expect(validate).toThrow(
+            new RegExp(`implementation-proof-${dimension}.*authority-disjoint`, "u"),
+          );
+        } else {
+          expect(validate).not.toThrow();
+        }
+      }
     }
   });
 
