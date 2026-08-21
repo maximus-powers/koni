@@ -823,7 +823,11 @@ async function commitDisposableKoniConfiguration(project, message) {
       "stock Pi's project package cache must retain its exact ignore guard",
     );
   }
-  await execFileAsync("git", ["add", ".koni", ".pi/settings.json"], { cwd: project });
+  await execFileAsync(
+    "git",
+    ["add", ".koni", ".pi/settings.json", ...(piCacheGuardPresent ? [piGitCacheGuard] : [])],
+    { cwd: project },
+  );
   await execFileAsync(
     "git",
     [
@@ -844,8 +848,17 @@ async function commitDisposableKoniConfiguration(project, message) {
     });
     assert.equal(
       after.stdout.trim(),
-      `?? ${piGitCacheGuard}`,
-      "a Koni configuration commit must leave Pi's exact package-cache guard untracked",
+      "",
+      "the disposable operator commit must leave the target checkout clean for promotion",
+    );
+    assert.equal(
+      (
+        await execFileAsync("git", ["ls-files", "--error-unmatch", piGitCacheGuard], {
+          cwd: project,
+        })
+      ).stdout.trim(),
+      piGitCacheGuard,
+      "the exact Pi package-cache guard must be tracked while cached package bytes stay ignored",
     );
   }
 }

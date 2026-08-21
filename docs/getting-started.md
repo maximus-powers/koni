@@ -140,6 +140,11 @@ other Pi settings. Pi resolves the package exactly as it does in any other repos
 inherit that resolved environment by default; use `.koni/agents/<id>.yaml` only to narrow a specific
 agent.
 
+When Pi first resolves that Git package, it creates `.pi/git/.gitignore` to keep managed checkout
+bytes out of the repository. Commit that guard together with `.pi/settings.json` and the initialized
+`.koni` configuration. The package checkout remains ignored, while the target checkout stays clean
+for Koni's fail-closed final promotion.
+
 Repeated initialization is safe. Köni preserves unrelated agent-tool content such as `.claude` and
 `.codex`, and refuses to overwrite an owned resource that changed after installation. Restore or
 reconcile that resource first. Move durable local customization into a project-owned resource where
