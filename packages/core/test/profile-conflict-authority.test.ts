@@ -16,8 +16,8 @@ import { canonicalHash, rawSha256 } from "../src/shared/canonical.js";
 
 const execFileAsync = promisify(execFile);
 const codingProfile = path.resolve(import.meta.dirname, "../../coding-profile");
-const resourcePath = "resources/pi-packages.yaml";
-const unrelatedResourcePath = "resources/skills/model-koni-work/references/graph-model.md";
+const resourcePath = "agents/lead.yaml";
+const unrelatedResourcePath = "agents/reviewer.yaml";
 const roots: string[] = [];
 const engines: RunAuthorityEngine[] = [];
 
@@ -153,10 +153,7 @@ describe("profile conflict authority", () => {
       authorityRequestSha256,
     });
     const unrelated = path.join(fixture.projectRoot, ".koni", unrelatedResourcePath);
-    await writeFile(
-      unrelated,
-      `${await readFile(unrelated, "utf8")}\nProject guidance added after the transaction.\n`,
-    );
+    await writeFile(unrelated, rewriteAgentDescription(await readFile(unrelated, "utf8"), "Drift"));
     const before = await engine.store.state();
 
     await expect(
@@ -225,25 +222,23 @@ async function conflictFixture(label: string): Promise<{
     const sourcePath = path.join(root, "koni", "baseline", resourcePath);
     await writeFile(
       sourcePath,
-      rewritePiPackageDescription(await readFile(sourcePath, "utf8"), "upstream revision"),
+      rewriteAgentDescription(await readFile(sourcePath, "utf8"), "upstream revision"),
     );
   });
   const projectPath = path.join(projectRoot, ".koni", resourcePath);
   await writeFile(
     projectPath,
-    rewritePiPackageDescription(await readFile(projectPath, "utf8"), "project choice"),
+    rewriteAgentDescription(await readFile(projectPath, "utf8"), "project choice"),
   );
   const projectSha256 = rawSha256(await readFile(projectPath));
   await installProfile(projectRoot, upgradedProfile);
   return { projectRoot, upgradedProfile, projectSha256 };
 }
 
-function rewritePiPackageDescription(source: string, description: string): string {
-  const document = YAML.parse(source) as { bindings?: Array<Record<string, unknown>> };
-  if (!Array.isArray(document.bindings) || document.bindings.length === 0) {
-    throw new Error("Pi package fixture lacks a binding");
-  }
-  document.bindings[0]!.description = description;
+function rewriteAgentDescription(source: string, description: string): string {
+  const document = YAML.parse(source) as Record<string, unknown>;
+  if (typeof document.id !== "string") throw new Error("agent fixture lacks an identity");
+  document.description = description;
   return YAML.stringify(document);
 }
 

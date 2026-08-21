@@ -2234,6 +2234,7 @@ function assertSourceCorrectionSeedAuthority(
     "ticketId",
     "proposalTicketId",
     "requestSha256",
+    "archiveSupersessionSha256",
     "route",
     "releaseDecisionSha256",
     "archivedCycleId",
@@ -2254,6 +2255,8 @@ function assertSourceCorrectionSeedAuthority(
     value.ticketId !== ticketId ||
     !isId(value.proposalTicketId) ||
     !isSha256Digest(value.requestSha256) ||
+    (value.archiveSupersessionSha256 !== undefined &&
+      !isSha256Digest(value.archiveSupersessionSha256)) ||
     (value.route !== "planned_asset_repair" &&
       value.route !== "proposal_review_exhausted" &&
       value.route !== "no_op" &&
@@ -3688,7 +3691,7 @@ function sourceCorrectionSeedMatchesRun(
     cycle?.ticketId !== ticket.id ||
     cycle.status !== "retired" ||
     cycle.archiveRef !== seed.archiveRef ||
-    cycle.supersessionSha256 !== seed.requestSha256 ||
+    cycle.supersessionSha256 !== (seed.archiveSupersessionSha256 ?? seed.requestSha256) ||
     cycle.baseRunOid !== seed.candidateBaseOid ||
     cycle.ticketHeadOid !== seed.candidateOid
   ) {
@@ -4591,7 +4594,7 @@ function assertSourceCorrectionSeedMutation(
       cycle?.ticketId !== ticketId ||
       cycle.status !== "retired" ||
       cycle.archiveRef === undefined ||
-      cycle.supersessionSha256 !== request.requestSha256 ||
+      cycle.supersessionSha256 === undefined ||
       cycle.ticketHeadOid === cycle.baseRunOid ||
       currentTicket.status !== "queued" ||
       currentTicket.executionEpoch !== priorEpoch + 1 ||
@@ -4603,6 +4606,7 @@ function assertSourceCorrectionSeedMutation(
       seed.ticketId !== ticketId ||
       seed.proposalTicketId !== proposal.id ||
       seed.requestSha256 !== request.requestSha256 ||
+      seed.archiveSupersessionSha256 !== cycle.supersessionSha256 ||
       seed.route !== route ||
       seed.releaseDecisionSha256 !== release.sha256 ||
       seed.archivedCycleId !== cycle.cycleId ||

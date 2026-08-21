@@ -33,7 +33,7 @@ import { canonicalHash, rawSha256 } from "../src/shared/canonical.js";
 const execFileAsync = promisify(execFile);
 const roots: string[] = [];
 const codingProfile = path.resolve(import.meta.dirname, "../../coding-profile");
-const resourcePath = "resources/pi-packages.yaml";
+const resourcePath = "agents/lead.yaml";
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -80,7 +80,7 @@ describe("upstream profile conflict service", () => {
     const root = await project("conflicts");
     await installProfile(root, codingProfile);
     const upgraded = await upgradedCodingProfile();
-    const local = rewritePiPackageDescription(
+    const local = rewriteAgentDescription(
       await readFile(path.join(root, ".koni", resourcePath), "utf8"),
       "project choice",
     );
@@ -89,7 +89,7 @@ describe("upstream profile conflict service", () => {
 
     const catalog = await listProjectProfileConflicts(root, upgraded);
     expect(catalog.conflicts).toEqual([
-      expect.objectContaining({ path: resourcePath, title: "Pi Packages", reason: "modified" }),
+      expect.objectContaining({ path: resourcePath, title: "Lead", reason: "modified" }),
     ]);
     const inspected = await inspectProjectProfileConflict(root, upgraded, resourcePath);
     expect(inspected.currentText).toBe(local);
@@ -109,7 +109,7 @@ describe("upstream profile conflict service", () => {
     const root = await project("conflict-crash-recovery");
     await installProfile(root, codingProfile);
     const upgraded = await upgradedCodingProfile();
-    const local = rewritePiPackageDescription(
+    const local = rewriteAgentDescription(
       await readFile(path.join(root, ".koni", resourcePath), "utf8"),
       "keepable project choice",
     );
@@ -217,17 +217,17 @@ describe("upstream profile conflict service", () => {
     const root = await project("conflict-symlink");
     await installProfile(root, codingProfile);
     const upgraded = await upgradedCodingProfile();
-    const local = rewritePiPackageDescription(
+    const local = rewriteAgentDescription(
       await readFile(path.join(root, ".koni", resourcePath), "utf8"),
       "Project choice.",
     );
     await writeFile(path.join(root, ".koni", resourcePath), local);
     await installProfile(root, upgraded);
-    const resourcesRoot = path.join(root, ".koni", "resources");
-    const retained = path.join(root, ".koni", "resources-retained");
-    const outside = await temporary("outside-resources");
-    await rename(resourcesRoot, retained);
-    await symlink(outside, resourcesRoot);
+    const agentsRoot = path.join(root, ".koni", "agents");
+    const retained = path.join(root, ".koni", "agents-retained");
+    const outside = await temporary("outside-agents");
+    await rename(agentsRoot, retained);
+    await symlink(outside, agentsRoot);
     await expect(inspectProjectProfileConflict(root, upgraded, resourcePath)).rejects.toMatchObject(
       {
         code: "profile_conflict_path",
@@ -262,17 +262,15 @@ async function upgradedCodingProfile(): Promise<string> {
   const root = await temporary("upgraded-profile");
   await cp(codingProfile, root, { recursive: true });
   await rewritePackageFile(root, resourcePath, (source) =>
-    rewritePiPackageDescription(source, "upstream revision"),
+    rewriteAgentDescription(source, "upstream revision"),
   );
   return root;
 }
 
-function rewritePiPackageDescription(source: string, description: string): string {
-  const document = YAML.parse(source) as { bindings?: Array<Record<string, unknown>> };
-  if (!Array.isArray(document.bindings) || document.bindings.length === 0) {
-    throw new Error("Pi package fixture lacks a binding");
-  }
-  document.bindings[0]!.description = description;
+function rewriteAgentDescription(source: string, description: string): string {
+  const document = YAML.parse(source) as Record<string, unknown>;
+  if (typeof document.id !== "string") throw new Error("agent fixture lacks an identity");
+  document.description = description;
   return YAML.stringify(document);
 }
 
@@ -288,7 +286,7 @@ async function rewritePackageFile(
   );
   const manifestPath = path.join(packageRoot, "koni", "profile-manifest.json");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as ProfilePackageManifest;
-  const version = manifest.package.version === "0.8.0" ? "0.8.1" : "0.8.0";
+  const version = nextPatchVersion(manifest.package.version);
   const profilePath = path.join(baselineRoot, "profile.yaml");
   const profileSource = await readFile(profilePath, "utf8");
   await writeFile(
@@ -309,4 +307,10 @@ async function rewritePackageFile(
     bundle_sha256: computeProfileBundleSha256(files, manifest.migrations ?? []),
   };
   await writeFile(manifestPath, `${JSON.stringify(next, null, 2)}\n`);
+}
+
+function nextPatchVersion(version: string): string {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/u.exec(version);
+  if (match === null) throw new Error(`profile fixture version is not stable semver: ${version}`);
+  return `${match[1]}.${match[2]}.${Number(match[3]) + 1}`;
 }

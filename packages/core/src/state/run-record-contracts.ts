@@ -305,6 +305,8 @@ export interface SourceCorrectionSeedAuthority {
   readonly ticketId: string;
   readonly proposalTicketId: string;
   readonly requestSha256: Sha256Digest;
+  /** The authority which actually retired the immutable source archive. Missing on legacy exact-request seeds. */
+  readonly archiveSupersessionSha256?: Sha256Digest;
   readonly route:
     "planned_asset_repair" | "proposal_review_exhausted" | "no_op" | "approved_application";
   readonly releaseDecisionSha256: Sha256Digest;

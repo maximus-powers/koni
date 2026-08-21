@@ -1,7 +1,7 @@
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,13 +17,19 @@ import {
 import { NativeRunCompilerProgram } from "../src/compiler/run-program.js";
 import type { VerifiedProfileBaseline } from "../src/compiler/profile-package.js";
 import type { AgentLaunchSpec } from "../src/pi/launch-spec.js";
+import type { PiResolvedInventory } from "../src/pi/agent-configuration.js";
 import type {
   AuthorityBackedTool,
   ManagedPiSessionFactory,
   PiSessionAdapter,
 } from "../src/pi/managed-session.js";
 import { ManagedSessionSupervisor } from "../src/pi/supervisor.js";
-import { IsolatedGitLifecycle, type GitLifecycleIntent } from "../src/git/lifecycle.js";
+import {
+  IsolatedGitLifecycle,
+  type GitIntentJournal,
+  type GitIntentSettlement,
+  type GitLifecycleIntent,
+} from "../src/git/lifecycle.js";
 import { canonicalHash, type Sha256Digest } from "../src/shared/canonical.js";
 import { installProfile, loadProfilePackage } from "../src/profile/install.js";
 import {
@@ -33,6 +39,7 @@ import {
   type TerminalFailureSettlementProof,
   type TicketExecutionControlRecord,
 } from "../src/state/run-record.js";
+import { ticketGitScope } from "../src/authority/run-engine-execution.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const researchProfile = path.join(repositoryRoot, "packages", "research-profile");
@@ -665,8 +672,14 @@ describe("composed change-control authority", () => {
 
   it("does not let a completed terminal resolver supersede a source held for a later proposal", async () => {
     const harness = new ScriptHarness(["fail", "request"], ["apply-change-request"]);
-    const fixture = await researchAuthority(harness);
-    const client = await AuthorityClient.connect({
+    let git!: IsolatedGitLifecycle;
+    let fixture = await researchAuthority(harness, {
+      git: (root) => {
+        git = new IsolatedGitLifecycle(root);
+        return git;
+      },
+    });
+    let client = await AuthorityClient.connect({
       projectRoot: fixture.root,
       client: "tui",
       version: "1.0.0",
@@ -744,20 +757,31 @@ describe("composed change-control authority", () => {
       sourceId,
       heldCycleId,
     });
-    await fixture.engine.server.mutateInternal(async ({ revision }) => {
-      const current = await fixture.engine.store.getRun(runId);
-      const draft = nextFixtureRun(current);
-      const cycle = draft.git.ticketCycles[heldCycleId]!;
-      cycle.status = "retired";
-      cycle.retiredAt = draft.updatedAt;
-      cycle.supersededAt = draft.updatedAt;
-      cycle.supersessionSha256 = legacySupersessionSha256;
-      cycle.archiveRef = `refs/koni/archive/${runId}/tickets/${sourceId}/cycles/${heldCycleId}/${legacySupersessionSha256.slice("sha256:".length)}`;
-      const committed = await fixture.engine.store.commit({
-        expectedRevision: revision,
-        runWrites: [{ record: draft, expectedRevision: current.revision }],
-      });
-      return { revision: committed.state.revision };
+    client.close();
+    await stopEngine(fixture.engine);
+    const current = await fixture.engine.store.getRun(runId);
+    const legacyLifecycle = await git.supersedeTicketCycle(
+      current.git,
+      {
+        cycleId: heldCycleId,
+        scope: ticketGitScope(current.tickets[sourceId]!),
+        subject: "Archive source under prior terminal resolver authority",
+        supersessionSha256: legacySupersessionSha256,
+      },
+      new CompletedGitJournal(),
+    );
+    const state = await fixture.engine.store.state();
+    const draft = nextFixtureRun(current);
+    draft.git = legacyLifecycle;
+    await fixture.engine.store.commit({
+      expectedRevision: state.revision,
+      runWrites: [{ record: draft, expectedRevision: current.revision }],
+    });
+    fixture = await openResearchEngine(fixture.root, fixture.baseline, harness, { git });
+    client = await AuthorityClient.connect({
+      projectRoot: fixture.root,
+      client: "tui",
+      version: "1.0.0",
     });
 
     await decideProposal(
@@ -771,7 +795,13 @@ describe("composed change-control authority", () => {
       const run = await fixture.engine.store.getRun(runId);
       if (run.lifecycle.phase === "blocked" || run.lifecycle.phase === "failed") {
         throw new Error(
-          run.lifecycle.blocker ?? run.lifecycle.terminalReason ?? run.lifecycle.phase,
+          JSON.stringify({
+            blocker: run.lifecycle.blocker ?? run.lifecycle.terminalReason ?? run.lifecycle.phase,
+            source: run.tickets[sourceId],
+            cycles: run.git.ticketCycles,
+            pendingGitIntents: run.pendingGitIntents,
+            activity: run.activity.slice(-12).map((entry) => entry.message),
+          }),
         );
       }
       const source = run.tickets[sourceId];
@@ -1864,6 +1894,7 @@ async function openResearchEngine(
     git?: IsolatedGitLifecycle;
     actionFault?: RunAuthorityEngineOptions["actionFault"];
     consumeExistingUpstreamRequest?: boolean;
+    piInventoryLoader?: () => Promise<PiResolvedInventory>;
   } = {},
 ): Promise<{
   root: string;
@@ -1876,6 +1907,7 @@ async function openResearchEngine(
   const native = await NativeRunCompilerProgram.create({
     projectRoot: root,
     packageBaseline: baseline,
+    piInventoryLoader: options.piInventoryLoader ?? fixturePiInventory,
     sealedModelBindingLoader: async (provider, modelId) => ({
       provider,
       id: modelId,
@@ -1902,6 +1934,64 @@ async function openResearchEngine(
   return { root, baseline, native, program, harness, engine };
 }
 
+const fixtureSuperpowersSkills = [
+  "brainstorming",
+  "dispatching-parallel-agents",
+  "executing-plans",
+  "finishing-a-development-branch",
+  "receiving-code-review",
+  "requesting-code-review",
+  "subagent-driven-development",
+  "systematic-debugging",
+  "test-driven-development",
+  "using-git-worktrees",
+  "using-superpowers",
+  "verification-before-completion",
+  "writing-plans",
+  "writing-skills",
+] as const;
+
+async function fixturePiInventory(): Promise<PiResolvedInventory> {
+  const fixtureRoot = await mkdtemp(path.join(tmpdir(), "koni-change-control-pi-inventory-"));
+  roots.push(fixtureRoot);
+  const skillIds = [
+    ...fixtureSuperpowersSkills,
+    "configure-koni",
+    "model-koni-work",
+    "operate-koni",
+  ];
+  const skills: PiResolvedInventory["resources"]["skills"][number][] = [];
+  for (const id of skillIds) {
+    const directory = path.join(fixtureRoot, id);
+    await mkdir(directory, { recursive: true });
+    const absolutePath = path.join(directory, "SKILL.md");
+    const content = `---\nname: ${id}\ndescription: Exercise the change-control fixture.\n---\n# ${id}\n`;
+    await writeFile(absolutePath, content);
+    const coreSkill = !fixtureSuperpowersSkills.includes(
+      id as (typeof fixtureSuperpowersSkills)[number],
+    );
+    skills.push({
+      kind: "skill",
+      id,
+      relativePath: coreSkill ? `dist/skills/${id}/SKILL.md` : `skills/${id}/SKILL.md`,
+      absolutePath,
+      content,
+      source: coreSkill ? "npm:@koni/core" : "git:github.com/obra/superpowers",
+      scope: "project",
+    });
+  }
+  return {
+    settings: {
+      packages: ["git:github.com/obra/superpowers", "npm:@koni/core"],
+      extensions: [],
+      skills: [],
+      prompts: [],
+      themes: [],
+    },
+    resources: { skills, extensions: [], prompts: [], themes: [], context: [] },
+  };
+}
+
 async function stopEngine(engine: RunAuthorityEngine): Promise<void> {
   const index = engines.indexOf(engine);
   if (index >= 0) engines.splice(index, 1);
@@ -1913,6 +2003,22 @@ function nextFixtureRun(run: Readonly<RunRecord>): RunRecord {
   draft.revision += 1;
   draft.updatedAt = new Date(Date.parse(run.updatedAt) + 1).toISOString();
   return draft;
+}
+
+class CompletedGitJournal implements GitIntentJournal {
+  readonly #pending = new Set<string>();
+
+  async prepare(intent: GitLifecycleIntent): Promise<void> {
+    this.#pending.add(intent.id);
+  }
+
+  async settle(intentId: string, _settlement: GitIntentSettlement): Promise<void> {
+    if (!this.#pending.delete(intentId)) throw new Error(`unknown Git intent ${intentId}`);
+  }
+
+  async supersedeWithCompensation(): Promise<void> {
+    throw new Error("fixture does not expect Git compensation");
+  }
 }
 
 async function createApprovedRun(

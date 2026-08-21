@@ -12,8 +12,8 @@ import { canonicalHash } from "../src/shared/canonical.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const EXPECTED_CATALOG_SHA256 = {
-  "coding-profile": "sha256:1d330c894b236f7f478fdb43217fc903cdf7646c0f9ce4f83573e139b6dd9eca",
-  "research-profile": "sha256:521e112e1222e5bb1b5decd519e501d29a8810d1eff363c5f9faa082b87039ed",
+  "coding-profile": "sha256:6cd60e7c7a5f70875b0898f1659edff020514687ef7ca8c449201f776ab0c9b8",
+  "research-profile": "sha256:55f1067ee3d6f42997413a3b94947cb062d675bd70e3c3f68bd6d144c8010eb1",
 } as const;
 
 describe("operation/workflow/check semantic catalog", () => {
@@ -50,12 +50,10 @@ describe("operation/workflow/check semantic catalog", () => {
         });
         expect(catalog.operations["lifecycle.change-request"]?.changeControl).toMatchObject({
           role: "proposal",
+          decisionPolicy: "automatic",
         });
-        expect(catalog.operations["lifecycle.change-request"]?.changeControl).not.toHaveProperty(
-          "decisionPolicy",
-        );
         expect(catalog.operations["lifecycle.change-request"]?.sha256).toBe(
-          "sha256:dcc3a6ebe01c4dfba173ff3a03998f65f81d1ef9b01e6fa5c02aafdcbc85b02e",
+          "sha256:b6a537e5c89d90f5c6dc763e02d49e16004e2b75182b4e934c681db316310dec",
         );
       } else {
         expect(catalog.operations["lifecycle.change-request"]?.changeControl).toMatchObject({

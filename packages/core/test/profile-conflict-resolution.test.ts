@@ -14,8 +14,8 @@ import { rawSha256 } from "../src/shared/canonical.js";
 
 const roots: string[] = [];
 const codingProfile = path.resolve(import.meta.dirname, "../../coding-profile");
-const resourcePath = "resources/pi-packages.yaml";
-const skillPath = "resources/skills/model-koni-work/references/graph-model.md";
+const resourcePath = "agents/lead.yaml";
+const skillPath = "project.yaml";
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -71,9 +71,13 @@ describe("explicit profile upstream conflict resolution", () => {
     const localResourceDocument = YAML.parse(
       await readFile(path.join(project, ".koni", resourcePath), "utf8"),
     ) as Record<string, any>;
-    localResourceDocument.bindings[0].description = "Project resource choice.";
+    localResourceDocument.description = "Project agent choice.";
     const localResource = YAML.stringify(localResourceDocument);
-    const localSkill = `${await readFile(path.join(project, ".koni", skillPath), "utf8")}\nProject-local guidance.\n`;
+    const localSkillDocument = YAML.parse(
+      await readFile(path.join(project, ".koni", skillPath), "utf8"),
+    ) as Record<string, any>;
+    localSkillDocument.project.description = "Project-local description.";
+    const localSkill = YAML.stringify(localSkillDocument);
     await writeFile(path.join(project, ".koni", resourcePath), localResource);
     await writeFile(path.join(project, ".koni", skillPath), localSkill);
 
@@ -154,21 +158,26 @@ async function upgradedCodingProfile(): Promise<string> {
   await cp(codingProfile, root, { recursive: true });
   const baselineRoot = path.join(root, "koni", "baseline");
   const profilePath = path.join(baselineRoot, "profile.yaml");
+  const manifestPath = path.join(root, "koni", "profile-manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as ProfilePackageManifest;
+  const version = nextPatchVersion(manifest.package.version);
   await writeFile(
     profilePath,
-    (await readFile(profilePath, "utf8")).replace("version: 0.7.0", "version: 0.8.0"),
+    (await readFile(profilePath, "utf8")).replace(
+      /^ {2}version: [^\n]+/mu,
+      `  version: ${version}`,
+    ),
   );
   const resource = YAML.parse(
     await readFile(path.join(baselineRoot, resourcePath), "utf8"),
   ) as Record<string, any>;
-  resource.bindings[0].description = "Upstream resource revision.";
+  resource.description = "Upstream agent revision.";
   await writeFile(path.join(baselineRoot, resourcePath), YAML.stringify(resource));
-  await writeFile(
-    path.join(baselineRoot, skillPath),
-    `${await readFile(path.join(baselineRoot, skillPath), "utf8")}\nUpstream guidance revision.\n`,
-  );
-  const manifestPath = path.join(root, "koni", "profile-manifest.json");
-  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as ProfilePackageManifest;
+  const projectDocument = YAML.parse(
+    await readFile(path.join(baselineRoot, skillPath), "utf8"),
+  ) as Record<string, any>;
+  projectDocument.project.description = "Upstream project description.";
+  await writeFile(path.join(baselineRoot, skillPath), YAML.stringify(projectDocument));
   const files = await Promise.all(
     manifest.baseline.files.map(async (descriptor) => {
       const bytes = await readFile(path.join(baselineRoot, descriptor.path));
@@ -177,13 +186,19 @@ async function upgradedCodingProfile(): Promise<string> {
   );
   const upgraded: ProfilePackageManifest = {
     ...manifest,
-    package: { ...manifest.package, version: "0.8.0" },
-    profile: { ...manifest.profile, version: "0.8.0" },
+    package: { ...manifest.package, version },
+    profile: { ...manifest.profile, version },
     baseline: { ...manifest.baseline, files },
     bundle_sha256: computeProfileBundleSha256(files, manifest.migrations ?? []),
   };
   await writeFile(manifestPath, `${JSON.stringify(upgraded, null, 2)}\n`);
   return root;
+}
+
+function nextPatchVersion(version: string): string {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/u.exec(version);
+  if (match === null) throw new Error(`profile fixture version is not stable semver: ${version}`);
+  return `${match[1]}.${match[2]}.${Number(match[3]) + 1}`;
 }
 
 async function fieldMergeCodingProfile(): Promise<string> {

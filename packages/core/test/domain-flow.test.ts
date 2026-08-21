@@ -157,13 +157,15 @@ describe("provider-free domain flows", () => {
       ({ operation }) => operation === "resolve-assets",
     )!;
     expect(compileTicket.scope.read_node_ids).toContain(asset.id);
-    expect(
-      Object.fromEntries(deriveCompilerTicketDependencies(evaluated.value.tickets, root)),
-    ).toEqual({
-      [compileTicket.id]: [defineGateTicket.id, resolvePrerequisiteTicket.id],
-      [defineGateTicket.id]: [],
-      [resolvePrerequisiteTicket.id]: [],
-    });
+    const dependencies = Object.fromEntries(
+      deriveCompilerTicketDependencies(evaluated.value.tickets, root),
+    );
+    expect(dependencies[compileTicket.id]).toHaveLength(2);
+    expect(dependencies[compileTicket.id]).toEqual(
+      expect.arrayContaining([defineGateTicket.id, resolvePrerequisiteTicket.id]),
+    );
+    expect(dependencies[defineGateTicket.id]).toEqual([]);
+    expect(dependencies[resolvePrerequisiteTicket.id]).toEqual([]);
     const implementationTicket = assetReviewTicket(configuration, asset.id);
     const dependenciesWithAssetProducer = Object.fromEntries(
       deriveCompilerTicketDependencies([...evaluated.value.tickets, implementationTicket], root),
@@ -257,7 +259,13 @@ describe("provider-free domain flows", () => {
     const configuration = compileProfile("research-profile");
     const generator = node("asset-generator", "asset", "Development pool generator", "active", {
       source_strategy: "generated",
-      capabilities: [{ name: "dev-pool.generator", protocol_version: "1.0.0" }],
+      capabilities: [
+        {
+          name: "dev-pool.generator",
+          protocol_version: "1.0.0",
+          entrypoints: ["program/assets/dev-pool/generate.py"],
+        },
+      ],
       implementation_plan: {
         root: "program/assets/dev-pool",
         files: ["program/assets/dev-pool/generate.py"],
@@ -331,7 +339,13 @@ describe("provider-free domain flows", () => {
     };
     const generator = node("asset-generator", "asset", "Development pool generator", "active", {
       source_strategy: "generated",
-      capabilities: [{ name: "dev-pool.generator", protocol_version: "1.0.0" }],
+      capabilities: [
+        {
+          name: "dev-pool.generator",
+          protocol_version: "1.0.0",
+          entrypoints: ["program/assets/dev-pool/generate.py"],
+        },
+      ],
       implementation_plan: {
         root: "program/assets/dev-pool",
         files: ["program/assets/dev-pool/generate.py"],
@@ -472,7 +486,13 @@ describe("provider-free domain flows", () => {
     };
     const generator = node("asset-generator", "asset", "Development pool generator", "active", {
       source_strategy: "generated",
-      capabilities: [{ name: "dev-pool.generator", protocol_version: "1.0.0" }],
+      capabilities: [
+        {
+          name: "dev-pool.generator",
+          protocol_version: "1.0.0",
+          entrypoints: ["program/assets/dev-pool/generate.py"],
+        },
+      ],
       implementation_plan: {
         root: "program/assets/dev-pool",
         files: ["program/assets/dev-pool/generate.py"],
@@ -686,7 +706,13 @@ describe("provider-free domain flows", () => {
       "Compatible verifier",
       "active",
       {
-        capabilities: [{ name: "fixture.verifier", protocol_version: "1.2.0" }],
+        capabilities: [
+          {
+            name: "fixture.verifier",
+            protocol_version: "1.2.0",
+            entrypoints: ["program/assets/fixture-verifier/verify.py"],
+          },
+        ],
         gate_contracts: { [gate.id]: { command: ["node", "program/assets/verify.mjs"] } },
       },
       { validates: [gate.id] },
@@ -1146,7 +1172,13 @@ describe("provider-free domain flows", () => {
     };
     delete assetType.filesystem_manifest?.files_field;
     const asset = node("asset-reviewed", "asset", "Reviewed fixture tool", "active", {
-      capabilities: [{ name: "fixture.tool", protocol_version: "1.0.0" }],
+      capabilities: [
+        {
+          name: "fixture.tool",
+          protocol_version: "1.0.0",
+          entrypoints: ["program/assets/fixture-tool/run.py"],
+        },
+      ],
       implementation_plan: {
         root: "program/assets/fixture-tool",
         files: ["program/assets/fixture-tool/run.py"],
@@ -1759,7 +1791,13 @@ function verifierNode(id: string, capability: string, gateId: string): CompilerG
     "draft",
     {
       source_strategy: "generated",
-      capabilities: [{ name: capability, protocol_version: "1.0.0" }],
+      capabilities: [
+        {
+          name: capability,
+          protocol_version: "1.0.0",
+          entrypoints: [`program/assets/${id}/verify.py`],
+        },
+      ],
       gate_contracts: {
         [gateId]: {
           protocol: "autoresearch.gate-result.v1",

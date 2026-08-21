@@ -669,7 +669,7 @@ function fixtureConfiguration(
     reports: empty,
     views: empty,
     state_machines: stateMachines,
-    agents: empty,
+    agents: { lead: { id: "lead" }, reviewer: { id: "reviewer" } },
   };
   const edgeTypes: ConfigurationObject[] = options.withGatePolicy
     ? [
@@ -720,7 +720,20 @@ function fixtureConfiguration(
     },
     run_type_order: [],
     run_types: {},
-    agents: {},
+    agents: {
+      lead: {
+        id: "lead",
+        path: "agents/lead.yaml",
+        source_sha256: digest("lead-agent"),
+        document: { id: "lead" },
+      },
+      reviewer: {
+        id: "reviewer",
+        path: "agents/reviewer.yaml",
+        source_sha256: digest("reviewer-agent"),
+        document: { id: "reviewer" },
+      },
+    },
     edge_types: edgeTypes,
     registries,
     behavior: {} as CompiledConfiguration["behavior"],

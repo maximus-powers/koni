@@ -1247,11 +1247,12 @@ export function sourceCorrectionSeedForRelease(
     cycle?.ticketId !== source.id ||
     cycle.status !== "retired" ||
     cycle.archiveRef === undefined ||
-    cycle.supersessionSha256 !== request.requestSha256 ||
+    cycle.supersessionSha256 === undefined ||
     cycle.ticketHeadOid === cycle.baseRunOid
   ) {
     return undefined;
   }
+  const archiveSupersessionSha256 = cycle.supersessionSha256 as Sha256Digest;
   const priorExecutionEpoch = currentTicketExecutionEpoch(run, source);
   const material = {
     protocol: "koni.source-correction-seed.v1" as const,
@@ -1259,6 +1260,7 @@ export function sourceCorrectionSeedForRelease(
     ticketId: source.id,
     proposalTicketId: proposal.id,
     requestSha256: request.requestSha256,
+    archiveSupersessionSha256,
     route,
     releaseDecisionSha256: release.sha256,
     archivedCycleId: cycle.cycleId,

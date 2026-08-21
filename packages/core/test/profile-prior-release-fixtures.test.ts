@@ -1,6 +1,11 @@
+import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
+import {
+  parseProfilePackageManifest,
+  verifyProfileBaseline,
+} from "../src/compiler/profile-package.js";
 import type { ProfilePackageManifest } from "../src/contracts/profile-package.js";
 import { loadProfilePackage } from "../src/profile/install.js";
 
@@ -22,19 +27,34 @@ const fixtures = [
 const repositoryRoot = path.resolve(import.meta.dirname, "../../..");
 
 describe("prior profile release fixtures", () => {
-  it.each(fixtures)("$directory is the byte-exact authenticated release", async (fixture) => {
-    const packageRoot = path.join(
-      import.meta.dirname,
-      "fixtures",
-      "profile-prior-releases",
-      fixture.directory,
-    );
+  it.each(fixtures)(
+    "$directory is the byte-exact authenticated schema-2 release",
+    async (fixture) => {
+      const packageRoot = path.join(
+        import.meta.dirname,
+        "fixtures",
+        "profile-prior-releases",
+        fixture.directory,
+      );
 
-    const loaded = await loadProfilePackage(packageRoot);
-
-    expect(loaded.manifest.bundle_sha256).toBe(fixture.bundleSha256);
-    expect(loaded.manifest.migrations).toBeUndefined();
-  });
+      const parsed = parseProfilePackageManifest(
+        await readFile(path.join(packageRoot, "koni", "profile-manifest.json"), "utf8"),
+        { compatibility: { profileSchemaVersion: "2.0.0" } },
+      );
+      expect(parsed.ok, parsed.diagnostics.map(({ message }) => message).join("\n")).toBe(true);
+      if (!parsed.ok) return;
+      const verified = verifyProfileBaseline(
+        parsed.value,
+        readTree(path.join(packageRoot, "koni", "baseline")),
+      );
+      expect(verified.ok, verified.diagnostics.map(({ message }) => message).join("\n")).toBe(true);
+      expect(parsed.value.bundle_sha256).toBe(fixture.bundleSha256);
+      expect(parsed.value.migrations).toBeUndefined();
+      await expect(loadProfilePackage(packageRoot)).rejects.toMatchObject({
+        code: "manifest_invalid",
+      });
+    },
+  );
 
   it.each(fixtures)("$directory is named exactly once by its target migration", async (fixture) => {
     const manifest = JSON.parse(
@@ -58,3 +78,20 @@ describe("prior profile release fixtures", () => {
     expect(matchingMigrations).toHaveLength(1);
   });
 });
+
+function readTree(root: string): ReadonlyMap<string, Uint8Array> {
+  const files = new Map<string, Uint8Array>();
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const candidate = path.join(directory, entry.name);
+      if (entry.isDirectory()) visit(candidate);
+      else if (entry.isFile())
+        files.set(
+          path.relative(root, candidate).split(path.sep).join("/"),
+          readFileSync(candidate),
+        );
+    }
+  };
+  visit(root);
+  return files;
+}

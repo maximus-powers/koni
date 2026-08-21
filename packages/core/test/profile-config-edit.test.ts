@@ -51,6 +51,7 @@ describe("lifecycle-owned structured project configuration edits", () => {
 
   it("publishes one complete valid document and bookkeeping in one source-hash CAS", async () => {
     const project = await initializedProject();
+    const piSettingsBefore = await readFile(path.join(project, ".pi", "settings.json"), "utf8");
     const before = await readProjectAuthoredConfigDocument(project, codingProfile, "project.yaml");
     const description = "Project-owned guided configuration description.";
     const document = structuredClone(before.document);
@@ -78,7 +79,7 @@ describe("lifecycle-owned structured project configuration edits", () => {
       }),
     );
     expect(await readFile(path.join(project, ".pi", "settings.json"), "utf8")).toBe(
-      '{"theme":"mine"}\n',
+      piSettingsBefore,
     );
   }, 30_000);
 
