@@ -26,6 +26,8 @@ const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 const execFileAsync = promisify(execFile);
 const stockPiVersion = "0.80.10";
 const stockTypeboxVersion = "1.1.38";
+const superpowersPackageSource = "git:github.com/obra/superpowers";
+const superpowersCloneUrl = "https://github.com/obra/superpowers";
 const publicPackages = new Map([
   ["@koni/core", "core"],
   ["@koni/coding-profile", "coding-profile"],
@@ -54,6 +56,87 @@ const offlineSuperpowersSkillIds = [
   "writing-plans",
   "writing-skills",
 ];
+
+test("the package rehearsal resolves the exact required Git package from a network-sealed fixture", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "koni-hermetic-git-package-"));
+  try {
+    const fixture = await createHermeticSuperpowersGitFixture(root);
+    const clone = path.join(root, "resolved-superpowers");
+    await execFileAsync("git", ["clone", superpowersCloneUrl, clone], {
+      env: providerFreeEnvironment(fixture.environment),
+    });
+    assert.deepEqual(
+      (await readdir(path.join(clone, "skills"))).sort(),
+      offlineSuperpowersSkillIds,
+      "the exact stock-Pi clone URL must resolve every required public skill identity",
+    );
+    assert.equal(
+      (await execFileAsync("git", ["remote", "get-url", "origin"], { cwd: clone })).stdout.trim(),
+      superpowersCloneUrl,
+      "the local transport substitution must preserve the production package identity",
+    );
+    await assert.rejects(
+      execFileAsync("git", ["clone", `${superpowersCloneUrl}-fork`, path.join(root, "forbidden")], {
+        env: providerFreeEnvironment(fixture.environment),
+      }),
+      "a neighboring HTTPS source must remain denied rather than matching a broad redirect",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+async function createHermeticSuperpowersGitFixture(root) {
+  const repository = path.join(root, "superpowers-source");
+  const config = path.join(root, "network-sealed-gitconfig");
+  await mkdir(path.join(repository, "skills"), { recursive: true });
+  for (const id of offlineSuperpowersSkillIds) {
+    const skillRoot = path.join(repository, "skills", id);
+    await mkdir(skillRoot);
+    await writeFile(
+      path.join(skillRoot, "SKILL.md"),
+      `---\nname: ${id}\ndescription: Hermetic package-smoke materialization of a declared Pi skill.\n---\n\nProvider-free package-smoke resource.\n`,
+      "utf8",
+    );
+  }
+  await execFileAsync("git", ["init", "-q"], { cwd: repository });
+  await execFileAsync("git", ["add", "skills"], { cwd: repository });
+  await execFileAsync(
+    "git",
+    [
+      "-c",
+      "user.name=Koni package smoke",
+      "-c",
+      "user.email=koni-smoke@example.invalid",
+      "commit",
+      "-q",
+      "-m",
+      `Materialize ${superpowersPackageSource}`,
+    ],
+    { cwd: repository },
+  );
+
+  const localCloneUrl = pathToFileURL(repository).href;
+  for (const [key, value] of [
+    [`url.${localCloneUrl}.insteadOf`, superpowersCloneUrl],
+    ["protocol.file.allow", "always"],
+    ["protocol.http.allow", "never"],
+    ["protocol.https.allow", "never"],
+    ["protocol.git.allow", "never"],
+    ["protocol.ssh.allow", "never"],
+  ]) {
+    await execFileAsync("git", ["config", "--file", config, key, value]);
+  }
+  return {
+    repository,
+    config,
+    environment: {
+      GIT_CONFIG_GLOBAL: config,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+    },
+  };
+}
 
 test("shipping manifests reuse Pi's bundled SDK while the development runtime stays exact", async () => {
   const root = JSON.parse(await readFile(path.join(repositoryRoot, "package.json"), "utf8"));
@@ -197,6 +280,7 @@ test(
       });
       await writeTarballWrapper(wrapper);
       await writeAmbientResources(agent, ambientPackage, wrapper);
+      const gitPackageFixture = await createHermeticSuperpowersGitFixture(root);
       const ambientBefore = await snapshotAmbient(agent, ambientPackage);
       const piEnvironment = providerFreeEnvironment({
         HOME: home,
@@ -207,6 +291,7 @@ test(
         npm_config_fund: "false",
         npm_config_offline: "true",
         npm_config_update_notifier: "false",
+        ...gitPackageFixture.environment,
         KONI_SMOKE_TARBALL_MAP: JSON.stringify(
           Object.fromEntries(
             [...archives].map(([name, value]) => [`${name}@${value.version}`, value.archive]),
@@ -297,6 +382,11 @@ test(
       // release UI failure remains quick to diagnose. The provider-free daemon is then quiesced; its
       // paused durable run remains available for the later preservation and uninstall assertions.
       await exerciseInstalledPiResources({ pi, project, agent, environment: piEnvironment });
+      assert.deepEqual(
+        JSON.parse(await readFile(path.join(project, ".pi", "settings.json"), "utf8")).packages,
+        [superpowersPackageSource],
+        "installed project settings must retain the exact production Superpowers package identity",
+      );
       await commitDisposableKoniConfiguration(project, "Track installed Koni configuration");
       const handlerEvidence = await assertInstalledPiCommandHandlers({
         stockPiRoot,
@@ -830,19 +920,6 @@ Ambient skill body.
 `,
     "utf8",
   );
-  // The installed profiles declare the real Superpowers Pi package in project settings. Give the
-  // initial installed-run admission a deterministic copy of that package's public skill identities
-  // rather than silently skipping the declared inventory and then misdiagnosing the compiler's
-  // fail-closed rejection as a modal hang.
-  for (const id of offlineSuperpowersSkillIds) {
-    const skillRoot = path.join(ambientPackage, "skills", id);
-    await mkdir(skillRoot, { recursive: true });
-    await writeFile(
-      path.join(skillRoot, "SKILL.md"),
-      `---\nname: ${id}\ndescription: Hermetic package-smoke materialization of a declared Pi skill.\n---\n\nProvider-free package-smoke resource.\n`,
-      "utf8",
-    );
-  }
   await writeFile(path.join(agent, "ambient-prompt.md"), "Ambient prompt.\n", "utf8");
   await writeFile(
     path.join(agent, "auth.json"),
