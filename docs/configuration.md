@@ -46,8 +46,8 @@ resolves that same environment when it creates a run.
 `koni init` and `koni update` have one narrow Pi-settings responsibility: they ensure the official
 `git:github.com/obra/superpowers@b36e0829c6d0140e93cfef2ca599b1b07d4a7797` package source is present
 in `.pi/settings.json`. They preserve all other settings and package entries. Koni records whether
-it added that entry. If a Koni-owned entry is later pinned, filtered, removed, or replaced, update
-fails with a conflict instead of overwriting the user’s change.
+it added that entry. If a Koni-owned entry is re-pinned, edited, filtered, removed, or replaced,
+update fails with a conflict instead of overwriting the user’s change.
 
 The 40-character suffix is an immutable upstream Git commit, not a branch or tag. Treat an upgrade
 as a reviewed dependency change: resolve the intended commit from the official

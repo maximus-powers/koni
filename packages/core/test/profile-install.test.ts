@@ -18,6 +18,7 @@ import { rawSha256 } from "../src/shared/canonical.js";
 
 const roots: string[] = [];
 const codingProfile = path.resolve(import.meta.dirname, "../../coding-profile");
+const legacySuperpowersPackage = "git:github.com/obra/superpowers";
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -93,6 +94,85 @@ describe("profile installation and guarded upgrades", () => {
     } satisfies Partial<ProfileInstallError>);
     expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(settings);
   }, 30_000);
+
+  it("atomically migrates the exact Koni-owned legacy Superpowers entry", async () => {
+    const project = await legacyKoniOwnedPiPackageProject();
+    const settingsPath = path.join(project, ".pi", "settings.json");
+
+    await installProfile(project, codingProfile);
+
+    expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual({
+      theme: "user-owned",
+      packages: ["user-package-before", REQUIRED_SUPERPOWERS_PI_PACKAGE, "user-package-after"],
+    });
+    expect(
+      JSON.parse(
+        await readFile(path.join(project, ".koni", ".managed", "pi-settings.json"), "utf8"),
+      ),
+    ).toEqual({
+      protocol: "koni.pi-settings-ownership.v1",
+      source: REQUIRED_SUPERPOWERS_PI_PACKAGE,
+      managed: true,
+    });
+  }, 30_000);
+
+  it.each([
+    {
+      name: "user-owned legacy entry",
+      packages: [legacySuperpowersPackage],
+      managed: false,
+    },
+    {
+      name: "filtered legacy entry",
+      packages: [{ source: legacySuperpowersPackage, skills: ["skills/using-superpowers/**"] }],
+      managed: true,
+    },
+    {
+      name: "object-shaped legacy entry",
+      packages: [{ source: legacySuperpowersPackage }],
+      managed: true,
+    },
+    {
+      name: "user re-pin",
+      packages: ["git:github.com/obra/superpowers@user-ref"],
+      managed: true,
+    },
+    {
+      name: "duplicate legacy entries",
+      packages: [legacySuperpowersPackage, legacySuperpowersPackage],
+      managed: true,
+    },
+    {
+      name: "removed legacy entry",
+      packages: [],
+      managed: true,
+    },
+  ])("rejects $name instead of widening the legacy migration", async ({ packages, managed }) => {
+    const project = await temporary("project");
+    await installProfile(project, codingProfile);
+    const settingsPath = path.join(project, ".pi", "settings.json");
+    const ownershipPath = path.join(project, ".koni", ".managed", "pi-settings.json");
+    const installPath = path.join(project, ".koni", ".managed", "install.json");
+    await writeFile(settingsPath, `${JSON.stringify({ packages, theme: "user-owned" })}\n`);
+    await writeFile(
+      ownershipPath,
+      `${JSON.stringify({
+        protocol: "koni.pi-settings-ownership.v1",
+        source: legacySuperpowersPackage,
+        managed,
+      })}\n`,
+    );
+    const settingsBefore = await readFile(settingsPath);
+    const ownershipBefore = await readFile(ownershipPath);
+    const installBefore = await readFile(installPath);
+
+    await expect(installProfile(project, codingProfile)).rejects.toMatchObject({
+      code: "pi_settings_conflict",
+    } satisfies Partial<ProfileInstallError>);
+    expect(await readFile(settingsPath)).toEqual(settingsBefore);
+    expect(await readFile(ownershipPath)).toEqual(ownershipBefore);
+    expect(await readFile(installPath)).toEqual(installBefore);
+  });
 
   it("previews without creating a lock, transaction, or .koni tree", async () => {
     const project = await temporary("project");
@@ -259,6 +339,27 @@ async function temporary(label: string): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), `koni-${label}-`));
   roots.push(root);
   return root;
+}
+
+async function legacyKoniOwnedPiPackageProject(): Promise<string> {
+  const project = await temporary("legacy-pi-package-project");
+  await installProfile(project, codingProfile);
+  await writeFile(
+    path.join(project, ".pi", "settings.json"),
+    `${JSON.stringify({
+      theme: "user-owned",
+      packages: ["user-package-before", legacySuperpowersPackage, "user-package-after"],
+    })}\n`,
+  );
+  await writeFile(
+    path.join(project, ".koni", ".managed", "pi-settings.json"),
+    `${JSON.stringify({
+      protocol: "koni.pi-settings-ownership.v1",
+      source: legacySuperpowersPackage,
+      managed: true,
+    })}\n`,
+  );
+  return project;
 }
 
 async function syntheticProfile(

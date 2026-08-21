@@ -51,6 +51,7 @@ const PI_SETTINGS_OWNERSHIP_PATH = ".managed/pi-settings.json";
 const PROFILE_LOCK_PATH = ".managed/profile-lifecycle.lock";
 export const REQUIRED_SUPERPOWERS_PI_PACKAGE =
   "git:github.com/obra/superpowers@b36e0829c6d0140e93cfef2ca599b1b07d4a7797" as const;
+const LEGACY_SUPERPOWERS_PI_PACKAGE = "git:github.com/obra/superpowers" as const;
 const PI_SETTINGS_OWNERSHIP_PROTOCOL = "koni.pi-settings-ownership.v1" as const;
 const profileLifecycleContext = new AsyncLocalStorage<{
   configRoot: string;
@@ -391,7 +392,30 @@ async function preparePiSettingsMerge(
       canonicalPiPackageIdentity(piPackageSource(entry)) ===
       canonicalPiPackageIdentity(REQUIRED_SUPERPOWERS_PI_PACKAGE),
   );
-  const exact = matching.filter(isExactRequiredPiPackage);
+  const exact = matching.filter((entry) =>
+    isExactPiPackage(entry, REQUIRED_SUPERPOWERS_PI_PACKAGE),
+  );
+  const legacyExact = matching.filter(
+    (entry) => typeof entry === "string" && entry === LEGACY_SUPERPOWERS_PI_PACKAGE,
+  );
+
+  if (ownership?.source === LEGACY_SUPERPOWERS_PI_PACKAGE) {
+    if (!ownership.managed || matching.length !== 1 || legacyExact.length !== 1) {
+      throw new ProfileInstallError(
+        "pi_settings_conflict",
+        `Koni's legacy Pi package entry was removed, re-pinned, edited, or duplicated: ${LEGACY_SUPERPOWERS_PI_PACKAGE}`,
+      );
+    }
+    packages[packages.indexOf(legacyExact[0]!)] = REQUIRED_SUPERPOWERS_PI_PACKAGE;
+    settings.packages = packages;
+    return piSettingsMergePlan({
+      settingsPath,
+      currentSettingsBytes,
+      settingsBytes: jsonBytes(settings),
+      currentOwnershipBytes,
+      managed: true,
+    });
+  }
 
   if (matching.length !== exact.length || exact.length > 1) {
     throw new ProfileInstallError(
@@ -413,11 +437,28 @@ async function preparePiSettingsMerge(
     settings.packages = packages;
     settingsBytes = jsonBytes(settings);
   }
-  const ownershipBytes = jsonBytes({
-    protocol: PI_SETTINGS_OWNERSHIP_PROTOCOL,
-    source: REQUIRED_SUPERPOWERS_PI_PACKAGE,
+  return piSettingsMergePlan({
+    settingsPath,
+    currentSettingsBytes,
+    settingsBytes,
+    currentOwnershipBytes,
     managed,
   });
+}
+
+function piSettingsMergePlan({
+  settingsPath,
+  currentSettingsBytes,
+  settingsBytes,
+  currentOwnershipBytes,
+  managed,
+}: Readonly<{
+  settingsPath: string;
+  currentSettingsBytes: Uint8Array | undefined;
+  settingsBytes: Uint8Array | undefined;
+  currentOwnershipBytes: Uint8Array | undefined;
+  managed: boolean;
+}>): PiSettingsMergePlan {
   return {
     settingsPath,
     expectedSettingsSha256:
@@ -425,7 +466,11 @@ async function preparePiSettingsMerge(
     ...(settingsBytes === undefined ? {} : { settingsBytes }),
     ownershipWrite: {
       path: PI_SETTINGS_OWNERSHIP_PATH,
-      bytes: ownershipBytes,
+      bytes: jsonBytes({
+        protocol: PI_SETTINGS_OWNERSHIP_PROTOCOL,
+        source: REQUIRED_SUPERPOWERS_PI_PACKAGE,
+        managed,
+      }),
       expectedSha256: currentOwnershipBytes === undefined ? null : rawSha256(currentOwnershipBytes),
     },
   };
@@ -458,7 +503,9 @@ async function applyPiSettingsMerge(plan: PiSettingsMergePlan): Promise<void> {
   }
 }
 
-function parsePiSettingsOwnership(bytes: Uint8Array | undefined): { managed: boolean } | undefined {
+function parsePiSettingsOwnership(
+  bytes: Uint8Array | undefined,
+): { source: string; managed: boolean } | undefined {
   if (bytes === undefined) return undefined;
   const value = parseJsonRecord(bytes, "pi_settings_ownership_invalid", "Pi settings ownership");
   rejectUnknownFields(
@@ -469,7 +516,8 @@ function parsePiSettingsOwnership(bytes: Uint8Array | undefined): { managed: boo
   );
   if (
     value.protocol !== PI_SETTINGS_OWNERSHIP_PROTOCOL ||
-    value.source !== REQUIRED_SUPERPOWERS_PI_PACKAGE ||
+    (value.source !== REQUIRED_SUPERPOWERS_PI_PACKAGE &&
+      value.source !== LEGACY_SUPERPOWERS_PI_PACKAGE) ||
     typeof value.managed !== "boolean"
   ) {
     throw new ProfileInstallError(
@@ -477,7 +525,7 @@ function parsePiSettingsOwnership(bytes: Uint8Array | undefined): { managed: boo
       "Pi settings ownership has an invalid shape",
     );
   }
-  return { managed: value.managed };
+  return { source: value.source, managed: value.managed };
 }
 
 function assertValidPiPackageEntry(value: unknown): void {
@@ -495,10 +543,10 @@ function piPackageSource(value: unknown): string {
   return typeof value === "string" ? value : String((value as Record<string, unknown>).source);
 }
 
-function isExactRequiredPiPackage(value: unknown): boolean {
-  if (typeof value === "string") return value === REQUIRED_SUPERPOWERS_PI_PACKAGE;
+function isExactPiPackage(value: unknown, source: string): boolean {
+  if (typeof value === "string") return value === source;
   const record = value as Record<string, unknown>;
-  return record.source === REQUIRED_SUPERPOWERS_PI_PACKAGE && Object.keys(record).length === 1;
+  return record.source === source && Object.keys(record).length === 1;
 }
 
 function canonicalPiPackageIdentity(source: string): string {
