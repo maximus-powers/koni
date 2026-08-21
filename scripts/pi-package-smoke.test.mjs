@@ -3696,7 +3696,7 @@ export default function legacyKoniCore(pi) {
   const agentBefore = await snapshotTree(agent);
   const child = spawn(pi, ["--mode", "rpc", "--no-session", "--approve"], {
     cwd: project,
-    env: environment,
+    env: { ...environment, NODE_ENV: "test" },
     stdio: ["pipe", "pipe", "pipe"],
   });
   let stdout = "";
@@ -3765,11 +3765,6 @@ export default function legacyKoniCore(pi) {
       projectSettingsBytes,
       "duplicate detection must not remove or rewrite project resources itself",
     );
-    assert.deepEqual(
-      await snapshotTree(agent),
-      agentBefore,
-      "duplicate detection must preserve global Pi credentials, settings, and unrelated resources",
-    );
   } finally {
     child.stdin.end();
     if (child.exitCode === null) child.kill("SIGTERM");
@@ -3778,6 +3773,11 @@ export default function legacyKoniCore(pi) {
       else child.once("exit", resolve);
     });
   }
+  assert.deepEqual(
+    await snapshotTree(agent),
+    agentBefore,
+    "duplicate detection and Pi shutdown must preserve global credentials, settings, models, and unrelated resources",
+  );
 }
 
 async function writePtyInputs(child, inputs) {
