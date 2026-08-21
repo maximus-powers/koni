@@ -22,6 +22,10 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { providerFreeEnvironment } from "./provider-free-environment.mjs";
+import {
+  materializePinnedSuperpowersRepository,
+  pinnedSuperpowersFixture,
+} from "./superpowers-pinned-fixture.mjs";
 
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -85,13 +89,13 @@ test("the package rehearsal resolves the exact required Git package from a netwo
     });
     const fixture = await createHermeticSuperpowersGitFixture(root);
     const clone = path.join(root, "resolved-superpowers");
-    await execFileAsync(
-      "git",
-      ["clone", "--branch", superpowersCommit, superpowersCloneUrl, clone],
-      {
-        env: providerFreeEnvironment(fixture.environment),
-      },
-    );
+    await execFileAsync("git", ["clone", superpowersCloneUrl, clone], {
+      env: providerFreeEnvironment(fixture.environment),
+    });
+    await execFileAsync("git", ["checkout", superpowersCommit], {
+      cwd: clone,
+      env: providerFreeEnvironment(fixture.environment),
+    });
     assert.deepEqual(
       (await readdir(path.join(clone, "skills"))).sort(),
       offlineSuperpowersSkillIds,
@@ -126,39 +130,7 @@ test("the package rehearsal resolves the exact required Git package from a netwo
 async function createHermeticSuperpowersGitFixture(root) {
   const repository = path.join(root, "superpowers-source");
   const config = path.join(root, "network-sealed-gitconfig");
-  await mkdir(path.join(repository, "skills"), { recursive: true });
-  for (const id of offlineSuperpowersSkillIds) {
-    const skillRoot = path.join(repository, "skills", id);
-    await mkdir(skillRoot);
-    await writeFile(
-      path.join(skillRoot, "SKILL.md"),
-      `---\nname: ${id}\ndescription: Hermetic package-smoke materialization of a declared Pi skill.\n---\n\nProvider-free package-smoke resource.\n`,
-      "utf8",
-    );
-  }
-  await execFileAsync("git", ["init", "-q"], { cwd: repository });
-  await execFileAsync("git", ["add", "skills"], { cwd: repository });
-  await execFileAsync(
-    "git",
-    [
-      "-c",
-      "user.name=Koni package smoke",
-      "-c",
-      "user.email=koni-smoke@example.invalid",
-      "commit",
-      "-q",
-      "-m",
-      `Materialize ${superpowersPackageSource}`,
-    ],
-    { cwd: repository },
-  );
-  await execFileAsync("git", ["tag", superpowersCommit], { cwd: repository });
-  const commitOid = (
-    await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: repository })
-  ).stdout.trim();
-  const treeOid = (
-    await execFileAsync("git", ["rev-parse", "HEAD^{tree}"], { cwd: repository })
-  ).stdout.trim();
+  await materializePinnedSuperpowersRepository(repository);
 
   const localCloneUrl = pathToFileURL(repository).href;
   for (const [key, value] of [
@@ -174,8 +146,8 @@ async function createHermeticSuperpowersGitFixture(root) {
   return {
     repository,
     config,
-    commitOid,
-    treeOid,
+    commitOid: pinnedSuperpowersFixture.commit,
+    treeOid: pinnedSuperpowersFixture.tree,
     environment: {
       GIT_CONFIG_GLOBAL: config,
       GIT_CONFIG_NOSYSTEM: "1",
