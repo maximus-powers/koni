@@ -503,6 +503,16 @@ test(
         version: archives.get("@koni/core").version,
       });
 
+      // The provider-free authority deliberately skips package installation under NODE_ENV=test.
+      // Cross the same project-local stock-Pi resolution boundary an operator crosses before asking
+      // Koni to create work, rather than borrowing the unrelated primary project's package cache.
+      await resolveInstalledPiResources({
+        pi,
+        project: cliProject,
+        environment: piEnvironment,
+      });
+      await assertHermeticSuperpowersResolution(cliProject);
+
       const piStateBeforeSession = await snapshotTree(agent);
       await constructAndAbortAgentSession({
         stockPiRoot,
@@ -3545,6 +3555,72 @@ async function exerciseInstalledPiResources({ pi, project, agent, environment })
       else child.once("exit", resolve);
     });
   }
+}
+
+async function resolveInstalledPiResources({ pi, project, environment }) {
+  const child = spawn(pi, ["--mode", "rpc", "--no-session"], {
+    cwd: project,
+    env: environment,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  try {
+    child.stdin.write(`${JSON.stringify({ id: "commands", type: "get_commands" })}\n`);
+    const response = await waitForRpcResponse(
+      child,
+      () => stdout,
+      () => stderr,
+      "commands",
+    );
+    const commands = response.data?.commands ?? [];
+    const inventory = JSON.stringify(commands.map(({ name, source }) => ({ name, source })));
+    for (const id of offlineSuperpowersSkillIds) {
+      assert.ok(
+        commands.some((command) => command.name === `skill:${id}` && command.source === "skill"),
+        `stock Pi did not resolve skill:${id} from the configured project package: ${inventory}`,
+      );
+    }
+  } finally {
+    child.stdin.end();
+    if (child.exitCode === null) child.kill("SIGTERM");
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once("exit", resolve);
+    });
+  }
+}
+
+async function assertHermeticSuperpowersResolution(project) {
+  const clone = path.join(project, ".pi", "git", "github.com", "obra", "superpowers");
+  assert.deepEqual(
+    JSON.parse(await readFile(path.join(project, ".pi", "settings.json"), "utf8")).packages,
+    [superpowersPackageSource],
+    "the CLI-initialized project must retain the exact production package identity",
+  );
+  assert.equal(
+    await readFile(path.join(project, ".pi", "git", ".gitignore"), "utf8"),
+    "*\n!.gitignore\n",
+    "stock Pi must create only its exact project package-cache guard",
+  );
+  assert.deepEqual(
+    (await readdir(path.join(clone, "skills"))).sort(),
+    offlineSuperpowersSkillIds,
+    "the CLI-initialized project must resolve every required public Superpowers skill",
+  );
+  assert.equal(
+    (await execFileAsync("git", ["remote", "get-url", "origin"], { cwd: clone })).stdout.trim(),
+    superpowersCloneUrl,
+    "the sealed local transport must preserve the production package origin",
+  );
 }
 
 async function assertLegacyDuplicateCoreIsInert({ pi, agent, root, environment }) {
