@@ -285,7 +285,10 @@ test(
       const piEnvironment = providerFreeEnvironment({
         HOME: home,
         PI_CODING_AGENT_DIR: agent,
-        PI_OFFLINE: "1",
+        // Stock Pi treats PI_OFFLINE as "skip every missing package", before Git gets a chance to
+        // resolve the exact configured source. Git's isolated protocol policy below is the network
+        // boundary for that real resolution path; npm and model access remain sealed separately.
+        PI_OFFLINE: undefined,
         npm_config_audit: "false",
         npm_config_cache: npmCache,
         npm_config_fund: "false",
@@ -3861,6 +3864,10 @@ async function uninstallKoniPackages({
 function providerFreeEnvironment(overrides) {
   const environment = { ...process.env, ...overrides };
   for (const name of Object.keys(environment)) {
+    if (environment[name] === undefined) {
+      delete environment[name];
+      continue;
+    }
     if (/(?:API[_-]?KEY|ACCESS[_-]?TOKEN|AUTH[_-]?TOKEN|SECRET[_-]?KEY)$/iu.test(name))
       delete environment[name];
   }
