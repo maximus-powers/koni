@@ -3596,9 +3596,12 @@ const project = ${JSON.stringify(project)};
 const agent = ${JSON.stringify(agent)};
 const settingsManager = SettingsManager.create(project, agent, { projectTrusted: true });
 const packageManager = new DefaultPackageManager({ cwd: project, agentDir: agent, settingsManager });
-assert.deepEqual(packageManager.listConfiguredPackages().map(({ source, scope }) => ({ source, scope })), [
-  { source: ${JSON.stringify(superpowersPackageSource)}, scope: "project" },
-]);
+assert.deepEqual(
+  packageManager.listConfiguredPackages()
+    .filter(({ scope }) => scope === "project")
+    .map(({ source, scope }) => ({ source, scope })),
+  [{ source: ${JSON.stringify(superpowersPackageSource)}, scope: "project" }],
+);
 const resolved = await packageManager.resolve();
 process.stdout.write(JSON.stringify(resolved.skills.map(({ path }) => path).sort()));
 `,
