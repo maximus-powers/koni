@@ -99,6 +99,7 @@ import {
   projectGatePolicyDefinitions,
   projectGraphSchemaDefinition,
 } from "../src/compiler/graph-schema.js";
+import { validateConfiguredGraphConstraints } from "../src/compiler/graph-constraints.js";
 import {
   RULE_AUTHORITY_EVIDENCE_PROTOCOL,
   createRuleAuthorityEvidence,
@@ -7481,6 +7482,12 @@ describe("native compiler-authoritative run program", () => {
     git(project.projectRoot, ["add", "src", "tests", "test-support"]);
     git(project.projectRoot, ["commit", "-m", "fixture impossible proof seam"]);
     const objective = "Reject an impossible proof source-preservation boundary";
+    const compiled = await compileProjectDirectory(project.projectRoot, project.baseline);
+    if (!compiled.ok) throw new Error("coding fixture configuration did not compile");
+    const projected = projectGraphSchemaDefinition(compiled.value);
+    if (!projected.ok) throw new Error("coding fixture graph schema did not compile");
+    const schema = new GraphSchema(projected.value);
+    const program = await compilerProgram(project);
 
     for (const [suffix, output, diagnostic] of [
       [
@@ -7502,20 +7509,25 @@ describe("native compiler-authoritative run program", () => {
         }),
         /implementation-proof-source.*authority-disjoint/u,
       ],
+      [
+        "migration-owned",
+        proofPreparationPlanningOutput({
+          implementationSubject: "migration",
+          migrationOwnedPaths: ["src/feature.ts", "test-support/vitest.config.ts"],
+        }),
+        /implementation-proof-support.*authority-disjoint/u,
+      ],
     ] as const) {
       const runId = `run-proof-support-overlap-${suffix}`;
-      const resolved = await compilerProgram(project).then((program) =>
-        program.resolveRun({
-          runId,
-          objective,
-          runTypeId: "small",
-          targetRef: "refs/heads/main",
-          intake: { goal: objective },
-        }),
-      );
+      const resolved = await program.resolveRun({
+        runId,
+        objective,
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: objective },
+      });
       await persistWrites(project.projectRoot, resolved.artifactWrites ?? []);
       const run = runRecord(project.projectRoot, runId, objective, resolved);
-      const program = await compilerProgram(project);
 
       await expect(
         program.compilePlanningOutput({
@@ -7524,6 +7536,90 @@ describe("native compiler-authoritative run program", () => {
           output,
         }),
       ).rejects.toThrow(diagnostic);
+    }
+
+    const compiledNodes = async (
+      suffix: string,
+      implementationSubject: "change" | "migration",
+    ): Promise<GraphNode[]> => {
+      const runId = `run-proof-lifecycle-${suffix}`;
+      const resolved = await program.resolveRun({
+        runId,
+        objective,
+        runTypeId: "small",
+        targetRef: "refs/heads/main",
+        intake: { goal: objective },
+      });
+      await persistWrites(project.projectRoot, resolved.artifactWrites ?? []);
+      const run = runRecord(project.projectRoot, runId, objective, resolved);
+      const planning = await program.compilePlanningOutput({
+        run,
+        attemptId: `attempt-proof-lifecycle-${suffix}`,
+        output: proofPreparationPlanningOutput({ implementationSubject }),
+      });
+      const graphWrite = planning.artifactWrites?.find((write) =>
+        write.path.endsWith("/planning-graph.json"),
+      );
+      if (graphWrite === undefined) throw new Error("planning graph artifact was not emitted");
+      const artifact = JSON.parse(Buffer.from(graphWrite.bytes).toString("utf8")) as {
+        nodes: Record<string, GraphNode>;
+      };
+      return Object.values(artifact.nodes);
+    };
+    const graphAtStatus = (
+      nodes: readonly GraphNode[],
+      type: "change" | "migration",
+      status: string,
+    ): TypedGraph =>
+      new TypedGraph(
+        schema,
+        nodes.map((node) =>
+          node.type === type
+            ? {
+                ...structuredClone(node),
+                status,
+                spec: {
+                  ...structuredClone(node.spec),
+                  owned_paths: ["src/feature.ts", "test-support/vitest.config.ts"],
+                },
+              }
+            : node,
+        ),
+        { projectRoot: project.projectRoot },
+      );
+
+    const changeNodes = await compiledNodes("change", "change");
+    expect(() =>
+      validateConfiguredGraphConstraints(
+        compiled.value,
+        graphAtStatus(changeNodes, "change", "implemented"),
+        project.projectRoot,
+      ),
+    ).toThrow(/implementation-proof-support.*authority-disjoint/u);
+    expect(() =>
+      validateConfiguredGraphConstraints(
+        compiled.value,
+        graphAtStatus(changeNodes, "change", "superseded"),
+        project.projectRoot,
+      ),
+    ).not.toThrow();
+
+    const migrationNodes = await compiledNodes("migration", "migration");
+    expect(() =>
+      validateConfiguredGraphConstraints(
+        compiled.value,
+        graphAtStatus(migrationNodes, "migration", "complete"),
+        project.projectRoot,
+      ),
+    ).toThrow(/implementation-proof-support.*authority-disjoint/u);
+    for (const status of ["rolled_back", "superseded"] as const) {
+      expect(() =>
+        validateConfiguredGraphConstraints(
+          compiled.value,
+          graphAtStatus(migrationNodes, "migration", status),
+          project.projectRoot,
+        ),
+      ).not.toThrow();
     }
   });
 
@@ -11804,10 +11900,14 @@ function planningOutput(
 function proofPreparationPlanningOutput(
   options: {
     changeOwnedPaths?: string[];
+    implementationSubject?: "change" | "migration";
+    migrationOwnedPaths?: string[];
     proofSourcePaths?: string[];
     proofSupportPaths?: string[];
   } = {},
 ): unknown {
+  const implementationSubject = options.implementationSubject ?? "change";
+  const subjectKey = implementationSubject === "change" ? "fixture-change" : "fixture-migration";
   return {
     ...(planningOutput({ work_kind: "new_feature" }) as Record<string, unknown>),
     graphSeed: {
@@ -11843,22 +11943,36 @@ function proofPreparationPlanningOutput(
             failure_meaning: "Existing data would become unavailable.",
           },
         },
-        {
-          key: "fixture-change",
-          type: "change",
-          title: "Add the compatible field behavior",
-          spec: {
-            current_state: "Only the legacy behavior exists.",
-            target_state: "The legacy identity and new behavior coexist.",
-            owned_paths: options.changeOwnedPaths ?? ["src/feature.ts"],
-            blast_radius: "One focused source module.",
-            risk_factors: ["The legacy identity could be replaced."],
-            proof_strategy: "red_green",
-            risk_tier: "routine",
-            approval_claim: "The focused behavior preserves compatibility.",
-            commit_type: "feat(fixture)",
-          },
-        },
+        implementationSubject === "change"
+          ? {
+              key: subjectKey,
+              type: "change",
+              title: "Add the compatible field behavior",
+              spec: {
+                current_state: "Only the legacy behavior exists.",
+                target_state: "The legacy identity and new behavior coexist.",
+                owned_paths: options.changeOwnedPaths ?? ["src/feature.ts"],
+                blast_radius: "One focused source module.",
+                risk_factors: ["The legacy identity could be replaced."],
+                proof_strategy: "red_green",
+                risk_tier: "routine",
+                approval_claim: "The focused behavior preserves compatibility.",
+                commit_type: "feat(fixture)",
+              },
+            }
+          : {
+              key: subjectKey,
+              type: "migration",
+              title: "Migrate the compatible field behavior",
+              spec: {
+                forward_plan: ["Introduce the compatible representation."],
+                owned_paths: options.migrationOwnedPaths ?? ["src/feature.ts"],
+                compatibility_window: "Both representations remain readable during transition.",
+                rollback_plan: ["Restore the legacy representation."],
+                data_safety: "The legacy representation remains intact.",
+                proof_strategy: "red_green",
+              },
+            },
         {
           key: "fixture-proof",
           type: "proof",
@@ -11898,11 +12012,18 @@ function proofPreparationPlanningOutput(
       edges: [
         { source: "$root", relation: "systems", target: "fixture-system" },
         { source: "$root", relation: "contracts", target: "fixture-contract" },
-        { source: "fixture-change", relation: "realizes", target: "$root" },
-        { source: "fixture-change", relation: "affects", target: "fixture-system" },
-        { source: "fixture-change", relation: "affects", target: "fixture-contract" },
+        ...(implementationSubject === "change"
+          ? [
+              { source: subjectKey, relation: "realizes", target: "$root" },
+              { source: subjectKey, relation: "affects", target: "fixture-system" },
+              { source: subjectKey, relation: "affects", target: "fixture-contract" },
+            ]
+          : [
+              { source: subjectKey, relation: "changes", target: "fixture-system" },
+              { source: subjectKey, relation: "protects", target: "fixture-contract" },
+            ]),
         { source: "fixture-contract", relation: "applies_to", target: "fixture-system" },
-        { source: "fixture-proof", relation: "verifies", target: "fixture-change" },
+        { source: "fixture-proof", relation: "verifies", target: subjectKey },
         { source: "fixture-proof", relation: "verifies", target: "fixture-contract" },
         { source: "fixture-proof", relation: "uses", target: "fixture-system" },
       ],
