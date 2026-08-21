@@ -3032,6 +3032,49 @@ describe("run authority engine", () => {
       correctionReleaseNext!.tickets[source.id]!,
     );
     assertRunExecutionControlMutation(correctionReleasePrevious!, exactReleaseNext);
+
+    const legacySerializedRelease = JSON.parse(JSON.stringify(exactReleaseNext)) as RunRecord;
+    const legacySerializedSeed =
+      legacySerializedRelease.tickets[source.id]!.executionControl!.sourceCorrectionSeeds![0]!;
+    const legacySerializedCycle =
+      legacySerializedRelease.git.ticketCycles[legacySerializedSeed.archivedCycleId]!;
+    legacySerializedCycle.supersessionSha256 = legacySerializedSeed.requestSha256;
+    legacySerializedCycle.archiveRef =
+      `refs/koni/archive/${runId}/tickets/${source.id}/cycles/` +
+      `${legacySerializedSeed.archivedCycleId}/${legacySerializedSeed.requestSha256.slice("sha256:".length)}`;
+    const {
+      archiveSupersessionSha256: _legacyArchiveSupersessionSha256,
+      sha256: _legacySha256,
+      ...legacySerializedMaterial
+    } = {
+      ...legacySerializedSeed,
+      archiveRef: legacySerializedCycle.archiveRef,
+    };
+    legacySerializedRelease.tickets[source.id]!.executionControl!.sourceCorrectionSeeds![0] = {
+      ...legacySerializedMaterial,
+      sha256: canonicalHash(legacySerializedMaterial),
+    };
+    const legacyRoundTrip = JSON.parse(JSON.stringify(legacySerializedRelease)) as RunRecord;
+    expect(() => assertRunRecord(legacyRoundTrip)).not.toThrow();
+    expect(
+      currentSourceCorrectionSeed(legacyRoundTrip, legacyRoundTrip.tickets[source.id]!),
+    ).toBeDefined();
+
+    const supersessionTamper = JSON.parse(JSON.stringify(exactReleaseNext)) as RunRecord;
+    const tamperedSupersessionSeed =
+      supersessionTamper.tickets[source.id]!.executionControl!.sourceCorrectionSeeds![0]!;
+    const { sha256: _tamperedSha256, ...tamperedSupersessionMaterial } = {
+      ...tamperedSupersessionSeed,
+      archiveSupersessionSha256: rawSha256("forged-archive-supersession"),
+    };
+    supersessionTamper.tickets[source.id]!.executionControl!.sourceCorrectionSeeds![0] = {
+      ...tamperedSupersessionMaterial,
+      sha256: canonicalHash(tamperedSupersessionMaterial),
+    };
+    expect(() => assertRunRecord(supersessionTamper)).toThrow(
+      "source-correction seed history is invalid",
+    );
+
     const rehashProjection = (
       projection: SourceCorrectionSeedAuthority["releaseProjection"],
       priority: number,
