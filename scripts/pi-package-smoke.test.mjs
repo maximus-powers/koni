@@ -2859,7 +2859,7 @@ raise SystemExit(1)
   try {
     const populated = await waitForOutput(
       () => stripTerminalControls(`${stdout}\n${stderr}`),
-      /Agents/u,
+      /Activity/u,
       30_000,
     );
     assert.match(populated, new RegExp(escapeRegExp(objective), "u"));
