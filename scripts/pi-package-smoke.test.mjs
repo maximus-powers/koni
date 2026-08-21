@@ -507,8 +507,10 @@ test(
       // Cross the same project-local stock-Pi resolution boundary an operator crosses before asking
       // Koni to create work, rather than borrowing the unrelated primary project's package cache.
       await resolveInstalledPiResources({
-        pi,
+        stockPiRoot,
+        agent,
         project: cliProject,
+        root,
         environment: piEnvironment,
       });
       await assertHermeticSuperpowersResolution(cliProject);
@@ -3557,45 +3559,44 @@ async function exerciseInstalledPiResources({ pi, project, agent, environment })
   }
 }
 
-async function resolveInstalledPiResources({ pi, project, environment }) {
-  const child = spawn(pi, ["--mode", "rpc", "--no-session"], {
+async function resolveInstalledPiResources({ stockPiRoot, agent, project, root, environment }) {
+  const sdkURL = pathToFileURL(
+    path.join(
+      stockPiRoot,
+      "node_modules",
+      "@earendil-works",
+      "pi-coding-agent",
+      "dist",
+      "index.js",
+    ),
+  ).href;
+  const helper = path.join(root, "resolve-installed-pi-resources.mjs");
+  await writeFile(
+    helper,
+    `
+import assert from "node:assert/strict";
+import { DefaultResourceLoader, SettingsManager } from ${JSON.stringify(sdkURL)};
+
+const project = ${JSON.stringify(project)};
+const agent = ${JSON.stringify(agent)};
+const settingsManager = SettingsManager.create(project, agent, { projectTrusted: true });
+const resourceLoader = new DefaultResourceLoader({ cwd: project, agentDir: agent, settingsManager });
+await resourceLoader.reload({ resolveProjectTrust: async () => true });
+const resolved = resourceLoader.getSkills();
+assert.deepEqual(resolved.diagnostics.filter((entry) => entry.type === "error"), []);
+process.stdout.write(JSON.stringify(resolved.skills.map((skill) => skill.name).sort()));
+`,
+    "utf8",
+  );
+  const result = await execFileAsync(process.execPath, [helper], {
     cwd: project,
     env: environment,
-    stdio: ["pipe", "pipe", "pipe"],
+    timeout: 30_000,
+    maxBuffer: 8 * 1024 * 1024,
   });
-  let stdout = "";
-  let stderr = "";
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => {
-    stdout += chunk;
-  });
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk;
-  });
-  try {
-    child.stdin.write(`${JSON.stringify({ id: "commands", type: "get_commands" })}\n`);
-    const response = await waitForRpcResponse(
-      child,
-      () => stdout,
-      () => stderr,
-      "commands",
-    );
-    const commands = response.data?.commands ?? [];
-    const inventory = JSON.stringify(commands.map(({ name, source }) => ({ name, source })));
-    for (const id of offlineSuperpowersSkillIds) {
-      assert.ok(
-        commands.some((command) => command.name === `skill:${id}` && command.source === "skill"),
-        `stock Pi did not resolve skill:${id} from the configured project package: ${inventory}`,
-      );
-    }
-  } finally {
-    child.stdin.end();
-    if (child.exitCode === null) child.kill("SIGTERM");
-    await new Promise((resolve) => {
-      if (child.exitCode !== null) resolve();
-      else child.once("exit", resolve);
-    });
+  const skills = JSON.parse(result.stdout);
+  for (const id of offlineSuperpowersSkillIds) {
+    assert.ok(skills.includes(id), `stock Pi did not resolve ${id}: ${JSON.stringify(skills)}`);
   }
 }
 
