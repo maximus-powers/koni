@@ -401,7 +401,7 @@ test(
         agent,
         project,
         root,
-        environment: { ...piEnvironment, KONI_PI_PACKAGE_ROOT: piPackageRoot },
+        environment: { ...launcherEnvironment, KONI_PI_PACKAGE_ROOT: piPackageRoot },
       });
       await commitDisposableKoniConfiguration(
         project,
