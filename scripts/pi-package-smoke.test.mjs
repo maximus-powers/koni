@@ -3560,31 +3560,47 @@ async function exerciseInstalledPiResources({ pi, project, agent, environment })
 }
 
 async function resolveInstalledPiResources({ stockPiRoot, agent, project, root, environment }) {
-  const sdkURL = pathToFileURL(
+  const packageManagerURL = pathToFileURL(
     path.join(
       stockPiRoot,
       "node_modules",
       "@earendil-works",
       "pi-coding-agent",
       "dist",
-      "index.js",
+      "core",
+      "package-manager.js",
+    ),
+  ).href;
+  const settingsManagerURL = pathToFileURL(
+    path.join(
+      stockPiRoot,
+      "node_modules",
+      "@earendil-works",
+      "pi-coding-agent",
+      "dist",
+      "core",
+      "settings-manager.js",
     ),
   ).href;
   const helper = path.join(root, "resolve-installed-pi-resources.mjs");
+  const modelsStorePath = path.join(agent, "models-store.json");
+  const modelsStoreBefore = await readFile(modelsStorePath);
   await writeFile(
     helper,
     `
 import assert from "node:assert/strict";
-import { DefaultResourceLoader, SettingsManager } from ${JSON.stringify(sdkURL)};
+import { DefaultPackageManager } from ${JSON.stringify(packageManagerURL)};
+import { SettingsManager } from ${JSON.stringify(settingsManagerURL)};
 
 const project = ${JSON.stringify(project)};
 const agent = ${JSON.stringify(agent)};
 const settingsManager = SettingsManager.create(project, agent, { projectTrusted: true });
-const resourceLoader = new DefaultResourceLoader({ cwd: project, agentDir: agent, settingsManager });
-await resourceLoader.reload({ resolveProjectTrust: async () => true });
-const resolved = resourceLoader.getSkills();
-assert.deepEqual(resolved.diagnostics.filter((entry) => entry.type === "error"), []);
-process.stdout.write(JSON.stringify(resolved.skills.map((skill) => skill.name).sort()));
+const packageManager = new DefaultPackageManager({ cwd: project, agentDir: agent, settingsManager });
+assert.deepEqual(packageManager.listConfiguredPackages().map(({ source, scope }) => ({ source, scope })), [
+  { source: ${JSON.stringify(superpowersPackageSource)}, scope: "project" },
+]);
+const resolved = await packageManager.resolve();
+process.stdout.write(JSON.stringify(resolved.skills.map(({ path }) => path).sort()));
 `,
     "utf8",
   );
@@ -3594,10 +3610,18 @@ process.stdout.write(JSON.stringify(resolved.skills.map((skill) => skill.name).s
     timeout: 30_000,
     maxBuffer: 8 * 1024 * 1024,
   });
-  const skills = JSON.parse(result.stdout);
-  for (const id of offlineSuperpowersSkillIds) {
-    assert.ok(skills.includes(id), `stock Pi did not resolve ${id}: ${JSON.stringify(skills)}`);
-  }
+  assert.equal(
+    Buffer.compare(await readFile(modelsStorePath), modelsStoreBefore),
+    0,
+    "stock Pi package resolution must not initialize or refresh the unrelated model store",
+  );
+  const clone = path.join(project, ".pi", "git", "github.com", "obra", "superpowers");
+  const resolvedSkillPaths = JSON.parse(result.stdout);
+  assert.deepEqual(
+    resolvedSkillPaths.filter((skillPath) => skillPath.startsWith(`${clone}${path.sep}`)),
+    offlineSuperpowersSkillIds.map((id) => path.join(clone, "skills", id)),
+    "the exact configured package must resolve all and only the required fixture skill paths",
+  );
 }
 
 async function assertHermeticSuperpowersResolution(project) {
