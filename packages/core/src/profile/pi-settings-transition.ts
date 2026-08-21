@@ -7,6 +7,8 @@ import { isSha256Digest, rawSha256, type Sha256Digest } from "../shared/canonica
 
 const TRANSITION_PROTOCOL = "koni.pi-settings-transition.v1" as const;
 const TRANSITION_PATH = "transition.json";
+const SUPERPOWERS_PI_PACKAGE_IDENTITY = "github.com/obra/superpowers" as const;
+const PI_SETTINGS_OWNERSHIP_PROTOCOL = "koni.pi-settings-ownership.v1" as const;
 
 interface PiSettingsTransitionAuthority {
   protocol: typeof TRANSITION_PROTOCOL;
@@ -52,18 +54,15 @@ export class PiSettingsTransitionCoordinator {
     projectRoot: string,
     configRoot: string,
   ): Promise<PiSettingsTransitionCoordinator> {
-    const coordinationRoot = path.join(configRoot, ".managed", "pi-settings-coordination");
-    await mkdir(coordinationRoot, { recursive: true, mode: 0o700 });
-    const coordinationMetadata = await lstat(coordinationRoot);
-    if (
-      !coordinationMetadata.isDirectory() ||
-      coordinationMetadata.isSymbolicLink() ||
-      (await realpath(coordinationRoot)) !== coordinationRoot
-    ) {
-      throw new PiSettingsTransitionError(
-        "pi_settings_transition_unsafe",
-        "Pi settings coordination root is not the exact managed directory",
-      );
+    const managedRoot = path.join(configRoot, ".managed");
+    const coordinationRoot = path.join(managedRoot, "pi-settings-coordination");
+    for (const directory of [
+      configRoot,
+      managedRoot,
+      coordinationRoot,
+      path.join(coordinationRoot, ".transactions"),
+    ]) {
+      await ensureDurableExactDirectory(directory);
     }
     return new PiSettingsTransitionCoordinator(
       await FileTransactionStore.open(coordinationRoot),
@@ -107,24 +106,28 @@ export class PiSettingsTransitionCoordinator {
     const markerBytes = await readOptionalStableFile(this.#transitionPath);
     if (markerBytes === undefined) return false;
     const authority = parseAuthority(markerBytes);
+    const desiredSettingsBytes = decodeDesiredBytes(
+      authority.desiredSettingsBase64,
+      authority.desiredSettingsSha256,
+      "settings",
+    );
+    const desiredOwnershipBytes = decodeDesiredBytes(
+      authority.desiredOwnershipBase64,
+      authority.desiredOwnershipSha256,
+      "ownership",
+    );
+    const ownershipSource = assertDesiredOwnership(desiredOwnershipBytes);
+    assertDesiredSettings(desiredSettingsBytes, ownershipSource);
     await replaceDurableFileCas(
       this.#settingsPath,
       authority.expectedSettingsSha256,
-      decodeDesiredBytes(
-        authority.desiredSettingsBase64,
-        authority.desiredSettingsSha256,
-        "settings",
-      ),
+      desiredSettingsBytes,
       authority.desiredSettingsSha256,
     );
     await replaceDurableFileCas(
       this.#ownershipPath,
       authority.expectedOwnershipSha256,
-      decodeDesiredBytes(
-        authority.desiredOwnershipBase64,
-        authority.desiredOwnershipSha256,
-        "ownership",
-      ),
+      desiredOwnershipBytes,
       authority.desiredOwnershipSha256,
     );
     const transactionId = `pi-settings-finalize-${randomUUID()}`;
@@ -198,6 +201,77 @@ function decodeDesiredBytes(base64: string, expected: Sha256Digest, label: strin
   return bytes;
 }
 
+function assertDesiredSettings(bytes: Uint8Array, ownershipSource: string): void {
+  const settings = parseDesiredRecord(bytes, "settings");
+  if (!Array.isArray(settings.packages)) {
+    throw invalidDesiredPayload("settings", "packages must be an array");
+  }
+  for (const entry of settings.packages) {
+    if (!(
+      (typeof entry === "string" && entry.length > 0) ||
+      (isRecord(entry) && typeof entry.source === "string" && entry.source.length > 0)
+    )) {
+      throw invalidDesiredPayload("settings", "contains an invalid package entry");
+    }
+  }
+  const matching = settings.packages.filter(
+    (entry) =>
+      canonicalPiPackageIdentity(
+        typeof entry === "string" ? entry : String((entry as Record<string, unknown>).source),
+      ) === canonicalPiPackageIdentity(ownershipSource),
+  );
+  if (matching.length !== 1 || matching[0] !== ownershipSource) {
+    throw invalidDesiredPayload("settings", "does not contain the exact required package binding");
+  }
+}
+
+function assertDesiredOwnership(bytes: Uint8Array): string {
+  const ownership = parseDesiredRecord(bytes, "ownership");
+  if (
+    Object.keys(ownership).some((field) => !["protocol", "source", "managed"].includes(field)) ||
+    ownership.protocol !== PI_SETTINGS_OWNERSHIP_PROTOCOL ||
+    typeof ownership.source !== "string" ||
+    canonicalPiPackageIdentity(ownership.source) !== SUPERPOWERS_PI_PACKAGE_IDENTITY ||
+    typeof ownership.managed !== "boolean"
+  ) {
+    throw invalidDesiredPayload("ownership", "has an invalid required-package binding");
+  }
+  return ownership.source;
+}
+
+function parseDesiredRecord(bytes: Uint8Array, label: string): Record<string, unknown> {
+  let value: unknown;
+  try {
+    value = JSON.parse(Buffer.from(bytes).toString("utf8"));
+  } catch {
+    throw invalidDesiredPayload(label, "is not valid JSON");
+  }
+  if (!isRecord(value)) throw invalidDesiredPayload(label, "is not an object");
+  return value;
+}
+
+function invalidDesiredPayload(label: string, reason: string): PiSettingsTransitionError {
+  return new PiSettingsTransitionError(
+    "pi_settings_transition_invalid",
+    `Pi settings transition ${label} payload ${reason}`,
+  );
+}
+
+function canonicalPiPackageIdentity(source: string): string {
+  return source
+    .replace(/^git:/u, "")
+    .replace(/^(?:https?|ssh):\/\//u, "")
+    .replace(/^git@github\.com:/u, "github.com/")
+    .replace(/\.git(?=@|$)/u, "")
+    .replace(/@[^/]+$/u, "")
+    .replace(/\/+$/u, "")
+    .toLowerCase();
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 async function replaceDurableFileCas(
   destination: string,
   expectedSha256: Sha256Digest | null,
@@ -206,7 +280,10 @@ async function replaceDurableFileCas(
 ): Promise<void> {
   const current = await readOptionalStableFile(destination);
   const currentSha256 = current === undefined ? null : rawSha256(current);
-  if (currentSha256 === desiredSha256) return;
+  if (currentSha256 === desiredSha256) {
+    await syncDesiredFile(destination, desiredSha256);
+    return;
+  }
   if (currentSha256 !== expectedSha256) {
     throw new PiSettingsTransitionError(
       "pi_settings_changed",
@@ -225,7 +302,10 @@ async function replaceDurableFileCas(
     handle = undefined;
     const beforeRename = await readOptionalStableFile(destination);
     const beforeRenameSha256 = beforeRename === undefined ? null : rawSha256(beforeRename);
-    if (beforeRenameSha256 === desiredSha256) return;
+    if (beforeRenameSha256 === desiredSha256) {
+      await syncDesiredFile(destination, desiredSha256);
+      return;
+    }
     if (beforeRenameSha256 !== expectedSha256) {
       throw new PiSettingsTransitionError(
         "pi_settings_changed",
@@ -238,6 +318,48 @@ async function replaceDurableFileCas(
     await handle?.close();
     await rm(temporary, { force: true });
   }
+}
+
+async function syncDesiredFile(filePath: string, desiredSha256: Sha256Digest): Promise<void> {
+  const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(filePath, constants.O_RDONLY | noFollow);
+    const before = await handle.stat();
+    if (!before.isFile()) {
+      throw new PiSettingsTransitionError(
+        "pi_settings_transition_unsafe",
+        `Pi settings transition target is not a regular file: ${filePath}`,
+      );
+    }
+    const bytes = await handle.readFile();
+    const afterRead = await handle.stat();
+    if (!sameFileState(before, afterRead) || rawSha256(bytes) !== desiredSha256) {
+      throw new PiSettingsTransitionError(
+        "pi_settings_changed",
+        `Pi settings transition target changed before durability: ${filePath}`,
+      );
+    }
+    await handle.sync();
+    const afterSync = await handle.stat();
+    if (!sameFileState(afterRead, afterSync)) {
+      throw new PiSettingsTransitionError(
+        "pi_settings_changed",
+        `Pi settings transition target changed during durability: ${filePath}`,
+      );
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new PiSettingsTransitionError(
+        "pi_settings_changed",
+        `Pi settings transition target disappeared before durability: ${filePath}`,
+      );
+    }
+    throw error;
+  } finally {
+    await handle?.close();
+  }
+  await syncDirectory(path.dirname(filePath));
 }
 
 async function readOptionalStableFile(filePath: string): Promise<Buffer | undefined> {
@@ -254,12 +376,7 @@ async function readOptionalStableFile(filePath: string): Promise<Buffer | undefi
     }
     const bytes = await handle.readFile();
     const after = await handle.stat();
-    if (
-      before.dev !== after.dev ||
-      before.ino !== after.ino ||
-      before.size !== after.size ||
-      before.mtimeMs !== after.mtimeMs
-    ) {
+    if (!sameFileState(before, after)) {
       throw new PiSettingsTransitionError(
         "pi_settings_changed",
         `Pi settings transition target changed while read: ${filePath}`,
@@ -272,6 +389,39 @@ async function readOptionalStableFile(filePath: string): Promise<Buffer | undefi
   } finally {
     await handle?.close();
   }
+}
+
+function sameFileState(
+  left: Awaited<ReturnType<Awaited<ReturnType<typeof open>>["stat"]>>,
+  right: Awaited<ReturnType<Awaited<ReturnType<typeof open>>["stat"]>>,
+): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs
+  );
+}
+
+async function ensureDurableExactDirectory(directory: string): Promise<void> {
+  try {
+    await mkdir(directory, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  const metadata = await lstat(directory);
+  if (
+    !metadata.isDirectory() ||
+    metadata.isSymbolicLink() ||
+    (await realpath(directory)) !== directory
+  ) {
+    throw new PiSettingsTransitionError(
+      "pi_settings_transition_unsafe",
+      "Pi settings coordination path is not an exact managed directory",
+    );
+  }
+  await syncDirectory(directory);
+  await syncDirectory(path.dirname(directory));
 }
 
 async function syncDirectory(directory: string): Promise<void> {

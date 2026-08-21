@@ -1,4 +1,6 @@
+import fs from "node:fs";
 import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -230,6 +232,156 @@ describe("profile installation and guarded upgrades", () => {
     expect(await readFile(journalPath)).toEqual(journalBefore);
   }, 30_000);
 
+  it.each([
+    {
+      corruption: "ownership base64",
+      mutate(authority: Record<string, unknown>) {
+        authority.desiredOwnershipBase64 = "%%%not-base64%%%";
+      },
+    },
+    {
+      corruption: "ownership hash",
+      mutate(authority: Record<string, unknown>) {
+        authority.desiredOwnershipSha256 = rawSha256(Buffer.from("different ownership\n"));
+      },
+    },
+    {
+      corruption: "ownership payload binding",
+      mutate(authority: Record<string, unknown>) {
+        const payload = Buffer.from(
+          `${JSON.stringify({
+            protocol: "koni.pi-settings-ownership.v1",
+            source: "git:github.com/obra/superpowers@different-ref",
+            managed: true,
+          })}\n`,
+        );
+        authority.desiredOwnershipSha256 = rawSha256(payload);
+        authority.desiredOwnershipBase64 = payload.toString("base64");
+      },
+    },
+    {
+      corruption: "settings payload schema",
+      mutate(authority: Record<string, unknown>) {
+        const payload = Buffer.from('{"packages":"not-an-array"}\n');
+        authority.desiredSettingsSha256 = rawSha256(payload);
+        authority.desiredSettingsBase64 = payload.toString("base64");
+      },
+    },
+  ])(
+    "authenticates $corruption before changing either Pi target",
+    async ({ mutate }) => {
+      const fixture = await piSettingsCrashFixture("legacy", "corrupt_marker_with_main_prepared");
+      const authority = JSON.parse(await readFile(fixture.transitionPath, "utf8")) as Record<
+        string,
+        unknown
+      >;
+      mutate(authority);
+      await writeFile(fixture.transitionPath, `${JSON.stringify(authority, null, 2)}\n`);
+      const journalPath = path.join(fixture.mainTransactionPath, "journal.json");
+      const before = {
+        settings: await readFile(fixture.settingsPath),
+        ownership: await readFile(fixture.ownershipPath),
+        transition: await readFile(fixture.transitionPath),
+        journal: await readFile(journalPath),
+      };
+
+      await expect(installProfile(fixture.project, codingProfile)).rejects.toMatchObject({
+        code: "pi_settings_transition_invalid",
+      } satisfies Partial<ProfileInstallError>);
+      expect(await readFile(fixture.settingsPath)).toEqual(before.settings);
+      expect(await readFile(fixture.ownershipPath)).toEqual(before.ownership);
+      expect(await readFile(fixture.transitionPath)).toEqual(before.transition);
+      expect(await readFile(journalPath)).toEqual(before.journal);
+    },
+    30_000,
+  );
+
+  it("fsyncs the complete coordination namespace before the external settings rename", async () => {
+    const project = await temporary("pi-settings-coordination-durability");
+    const events: string[] = [];
+
+    const result = await withFilesystemTrace(events, () => installProfile(project, codingProfile));
+
+    const configRoot = normalizedTracePath(result.projectConfigRoot);
+    const canonicalProject = path.dirname(configRoot);
+    const managedRoot = path.join(configRoot, ".managed");
+    const coordinationRoot = path.join(managedRoot, "pi-settings-coordination");
+    const transactionRoot = path.join(coordinationRoot, ".transactions");
+    const settingsPath = path.join(canonicalProject, ".pi", "settings.json");
+    const externalRename = events.findIndex((event) => event.endsWith(`->${settingsPath}`));
+    expect(externalRename).toBeGreaterThan(-1);
+    expectOrderedEventsBefore(
+      events,
+      [
+        `sync:${configRoot}`,
+        `sync:${project}`,
+        `sync:${managedRoot}`,
+        `sync:${configRoot}`,
+        `sync:${coordinationRoot}`,
+        `sync:${managedRoot}`,
+        `sync:${transactionRoot}`,
+        `sync:${coordinationRoot}`,
+      ],
+      externalRename,
+    );
+  }, 30_000);
+
+  it("re-establishes desired-target durability across repeated recovery crashes", async () => {
+    const fixture = await piSettingsCrashFixture("legacy", "after_external_rename");
+    const before = {
+      settings: await readFile(fixture.settingsPath),
+      ownership: await readFile(fixture.ownershipPath),
+      transition: await readFile(fixture.transitionPath),
+    };
+    const canonicalSettingsPath = normalizedTracePath(fixture.settingsPath);
+    const canonicalOwnershipPath = normalizedTracePath(fixture.ownershipPath);
+
+    const fileSyncEvents: string[] = [];
+    await expect(
+      withFilesystemTrace(
+        fileSyncEvents,
+        () => installProfile(fixture.project, codingProfile),
+        canonicalSettingsPath,
+      ),
+    ).rejects.toThrow("simulated crash after fsync");
+    expect(fileSyncEvents).toContain(`sync:${canonicalSettingsPath}`);
+    expect(await readFile(fixture.settingsPath)).toEqual(before.settings);
+    expect(await readFile(fixture.ownershipPath)).toEqual(before.ownership);
+    expect(await readFile(fixture.transitionPath)).toEqual(before.transition);
+
+    const parentSyncEvents: string[] = [];
+    const settingsParent = path.dirname(canonicalSettingsPath);
+    await expect(
+      withFilesystemTrace(
+        parentSyncEvents,
+        () => installProfile(fixture.project, codingProfile),
+        settingsParent,
+      ),
+    ).rejects.toThrow("simulated crash after fsync");
+    expectOrderedEventsBefore(parentSyncEvents, [
+      `sync:${canonicalSettingsPath}`,
+      `sync:${settingsParent}`,
+    ]);
+    expect(await readFile(fixture.settingsPath)).toEqual(before.settings);
+    expect(await readFile(fixture.ownershipPath)).toEqual(before.ownership);
+    expect(await readFile(fixture.transitionPath)).toEqual(before.transition);
+
+    const recoveryEvents: string[] = [];
+    await withFilesystemTrace(recoveryEvents, () => installProfile(fixture.project, codingProfile));
+    const ownershipRename = recoveryEvents.findIndex((event) =>
+      event.endsWith(`->${canonicalOwnershipPath}`),
+    );
+    expect(ownershipRename).toBeGreaterThan(-1);
+    expectOrderedEventsBefore(
+      recoveryEvents,
+      [`sync:${canonicalSettingsPath}`, `sync:${settingsParent}`],
+      ownershipRename,
+    );
+    expect(await readFile(fixture.settingsPath)).toEqual(fixture.desiredSettingsBytes);
+    expect(await readFile(fixture.ownershipPath)).toEqual(fixture.desiredOwnershipBytes);
+    await expect(stat(fixture.transitionPath)).rejects.toMatchObject({ code: "ENOENT" });
+  }, 30_000);
+
   it("converges a pre-existing main journal only after its external transition", async () => {
     const fixture = await piSettingsCrashFixture("legacy", "overlapping_main_prepared");
 
@@ -436,7 +588,8 @@ async function piSettingsCrashFixture(
     | "after_external_rename"
     | "before_internal_commit"
     | "after_internal_commit"
-    | "overlapping_main_prepared",
+    | "overlapping_main_prepared"
+    | "corrupt_marker_with_main_prepared",
 ) {
   const project =
     kind === "legacy"
@@ -500,7 +653,7 @@ async function piSettingsCrashFixture(
   await coordination.commit("pi-settings-crash-transition");
   await coordination.cleanupCommitted("pi-settings-crash-transition");
 
-  if (boundary !== "before_external_rename") {
+  if (boundary !== "before_external_rename" && boundary !== "corrupt_marker_with_main_prepared") {
     await writeFile(settingsPath, desiredSettingsBytes);
   }
   if (boundary === "before_internal_commit" || boundary === "after_internal_commit") {
@@ -516,7 +669,10 @@ async function piSettingsCrashFixture(
     ]);
     if (boundary === "after_internal_commit") await main.commit("profile-crash-main");
   }
-  if (boundary === "overlapping_main_prepared") {
+  if (
+    boundary === "overlapping_main_prepared" ||
+    boundary === "corrupt_marker_with_main_prepared"
+  ) {
     const main = await FileTransactionStore.open(path.join(project, ".koni"));
     await main.prepare("profile-crash-main", [
       {
@@ -536,6 +692,63 @@ async function piSettingsCrashFixture(
     desiredSettingsBytes,
     desiredOwnershipBytes,
   };
+}
+
+async function withFilesystemTrace<T>(
+  events: string[],
+  operation: () => Promise<T>,
+  failAfterSyncPath?: string,
+): Promise<T> {
+  const originalOpen = fs.promises.open;
+  const originalRename = fs.promises.rename;
+  const normalizedFailurePath =
+    failAfterSyncPath === undefined ? undefined : normalizedTracePath(failAfterSyncPath);
+  fs.promises.open = async (...args: Parameters<typeof originalOpen>) => {
+    const handle = await originalOpen(...args);
+    const openedPath = normalizedTracePath(String(args[0]));
+    const originalSync = handle.sync.bind(handle);
+    handle.sync = async () => {
+      await originalSync();
+      events.push(`sync:${openedPath}`);
+      if (openedPath === normalizedFailurePath) {
+        throw new Error(`simulated crash after fsync: ${openedPath}`);
+      }
+    };
+    return handle;
+  };
+  fs.promises.rename = async (...args: Parameters<typeof originalRename>) => {
+    events.push(
+      `rename:${normalizedTracePath(String(args[0]))}->${normalizedTracePath(String(args[1]))}`,
+    );
+    return originalRename(...args);
+  };
+  syncBuiltinESMExports();
+  try {
+    return await operation();
+  } finally {
+    fs.promises.open = originalOpen;
+    fs.promises.rename = originalRename;
+    syncBuiltinESMExports();
+  }
+}
+
+function normalizedTracePath(filePath: string): string {
+  return path.resolve(filePath).replace(/^\/private(?=\/var\/)/u, "");
+}
+
+function expectOrderedEventsBefore(
+  events: readonly string[],
+  expected: readonly string[],
+  beforeIndex = events.length,
+): void {
+  let cursor = -1;
+  for (const event of expected) {
+    cursor = events.indexOf(event, cursor + 1);
+    expect(cursor, `missing ordered filesystem event: ${event}`).toBeGreaterThan(-1);
+    expect(cursor, `filesystem event occurred after the external boundary: ${event}`).toBeLessThan(
+      beforeIndex,
+    );
+  }
 }
 
 async function syntheticProfile(
