@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -12,7 +12,10 @@ const metadata = JSON.parse(await readFile(path.join(fixtureRoot, "manifest.json
 
 export const pinnedSuperpowersFixture = Object.freeze(metadata);
 
-export async function materializePinnedSuperpowersRepository(destination) {
+export async function materializePinnedSuperpowersRepository(
+  destination,
+  environment = sealedLocalGitEnvironment(),
+) {
   const packSource = path.join(fixtureRoot, metadata.pack.file);
   const packBytes = await readFile(packSource);
   assert.equal(
@@ -21,7 +24,6 @@ export async function materializePinnedSuperpowersRepository(destination) {
     "the committed Superpowers object pack must match its reviewed manifest",
   );
   await mkdir(destination, { recursive: true });
-  const environment = sealedLocalGitEnvironment();
   await execFileAsync("git", ["init", "-q", "--bare"], { cwd: destination, env: environment });
   const packDestination = path.join(destination, "objects", "pack", metadata.pack.file);
   await copyFile(packSource, packDestination);
@@ -44,7 +46,40 @@ export async function materializePinnedSuperpowersRepository(destination) {
     cwd: destination,
     env: environment,
   });
-  await execFileAsync("git", ["symbolic-ref", "HEAD", "refs/heads/pinned"], {
+  const decoySource = path.join(destination, "decoy-default.txt");
+  await writeFile(decoySource, "This is the remote default, not the reviewed production pin.\n");
+  const decoyBlob = await gitOutput(destination, environment, "hash-object", "-w", decoySource);
+  await execFileAsync("git", ["read-tree", metadata.tree], { cwd: destination, env: environment });
+  await execFileAsync(
+    "git",
+    ["update-index", "--add", "--cacheinfo", "100644", decoyBlob, "KONI_DECOY"],
+    { cwd: destination, env: environment },
+  );
+  const decoyTree = await gitOutput(destination, environment, "write-tree");
+  const decoyCommitSource = path.join(destination, "decoy-commit.txt");
+  await writeFile(
+    decoyCommitSource,
+    `tree ${decoyTree}\nauthor Koni fixture <koni-fixture@example.invalid> 946684800 +0000\ncommitter Koni fixture <koni-fixture@example.invalid> 946684800 +0000\n\nCreate non-production default\n`,
+  );
+  const decoyCommit = await gitOutput(
+    destination,
+    environment,
+    "hash-object",
+    "-t",
+    "commit",
+    "-w",
+    decoyCommitSource,
+  );
+  await Promise.all([
+    rm(decoySource),
+    rm(decoyCommitSource),
+    rm(path.join(destination, "index"), { force: true }),
+  ]);
+  await execFileAsync("git", ["update-ref", "refs/heads/decoy", decoyCommit], {
+    cwd: destination,
+    env: environment,
+  });
+  await execFileAsync("git", ["symbolic-ref", "HEAD", "refs/heads/decoy"], {
     cwd: destination,
     env: environment,
   });
@@ -52,17 +87,32 @@ export async function materializePinnedSuperpowersRepository(destination) {
     cwd: destination,
     env: environment,
   });
-  assert.equal(await gitOutput(destination, "rev-parse", "HEAD"), metadata.commit);
-  assert.equal(await gitOutput(destination, "rev-parse", "--is-shallow-repository"), "true");
-  assert.equal(await gitOutput(destination, "rev-parse", "HEAD^{tree}"), metadata.tree);
-  assert.equal(await gitOutput(destination, "rev-parse", "HEAD:skills"), metadata.skillsTree);
+  assert.notEqual(await gitOutput(destination, environment, "rev-parse", "HEAD"), metadata.commit);
+  assert.notEqual(
+    await gitOutput(destination, environment, "rev-parse", "HEAD^{tree}"),
+    metadata.tree,
+  );
+  assert.equal(
+    await gitOutput(destination, environment, "rev-parse", "--is-shallow-repository"),
+    "true",
+  );
+  assert.equal(
+    await gitOutput(destination, environment, "rev-parse", "refs/heads/pinned"),
+    metadata.commit,
+  );
+  assert.equal(
+    await gitOutput(destination, environment, "rev-parse", "refs/heads/pinned^{tree}"),
+    metadata.tree,
+  );
+  assert.equal(
+    await gitOutput(destination, environment, "rev-parse", "refs/heads/pinned:skills"),
+    metadata.skillsTree,
+  );
   return destination;
 }
 
-async function gitOutput(cwd, ...args) {
-  return (
-    await execFileAsync("git", args, { cwd, env: sealedLocalGitEnvironment() })
-  ).stdout.trim();
+async function gitOutput(cwd, environment, ...args) {
+  return (await execFileAsync("git", args, { cwd, env: environment })).stdout.trim();
 }
 
 function sealedLocalGitEnvironment() {
