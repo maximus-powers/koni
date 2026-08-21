@@ -536,10 +536,11 @@ test(
         environment: launcherEnvironment,
         version: archives.get("@koni/core").version,
       });
+      await stopDisposableAuthority(cliProject);
       assert.deepEqual(
         await snapshotTree(agent),
         piStateBeforeSession,
-        "provider-free AgentSession construction must not alter ambient Pi state",
+        "provider-free sessions and the quiesced standalone authority must not alter ambient Pi state",
       );
 
       await assertLegacyDuplicateCoreIsInert({ pi, agent, root, environment: piEnvironment });
