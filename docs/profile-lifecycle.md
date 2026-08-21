@@ -27,11 +27,11 @@ Koni discovery events. Core verifies every manifest path, byte count, file hash,
 package identity, profile lineage, and compatibility range before use.
 
 Installation owns `<project>/.koni` plus one merge-owned entry in `<project>/.pi/settings.json`:
-`git:github.com/obra/superpowers`. It preserves every unrelated Pi setting and package entry and
-never reads or changes Pi credentials, sessions, `.agents`, `.claude`, or `.codex` content. Koni
-records whether it added the package entry in `.koni/.managed/pi-settings.json`. A later edit,
-filter, pin, removal, or duplicate of that owned entry is a conflict; update fails instead of
-replacing the user's bytes.
+`git:github.com/obra/superpowers@b36e0829c6d0140e93cfef2ca599b1b07d4a7797`. It preserves every
+unrelated Pi setting and package entry and never reads or changes Pi credentials, sessions,
+`.agents`, `.claude`, or `.codex` content. Koni records whether it added the package entry in
+`.koni/.managed/pi-settings.json`. A later edit, filter, pin, removal, or duplicate of that owned
+entry is a conflict; update fails instead of replacing the user's bytes.
 
 ## Baseline plus project overlay
 

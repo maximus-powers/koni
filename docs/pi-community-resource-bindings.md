@@ -25,7 +25,7 @@ needs them.
 
 ```json
 {
-  "packages": ["git:github.com/obra/superpowers"]
+  "packages": ["git:github.com/obra/superpowers@b36e0829c6d0140e93cfef2ca599b1b07d4a7797"]
 }
 ```
 
@@ -41,7 +41,7 @@ An agent inherits the full resolved Pi environment unless its `.koni/agents/<id>
 pi:
   settings:
     packages:
-      - source: git:github.com/obra/superpowers
+      - source: git:github.com/obra/superpowers@b36e0829c6d0140e93cfef2ca599b1b07d4a7797
         skills:
           - skills/using-superpowers/**
           - skills/systematic-debugging/**

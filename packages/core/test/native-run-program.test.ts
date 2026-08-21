@@ -11347,7 +11347,7 @@ async function fixturePiInventory(root: string): Promise<PiResolvedInventory> {
     });
   };
   for (const id of FIXTURE_SUPERPOWERS_SKILLS) {
-    await addSkill(id, "git:github.com/obra/superpowers");
+    await addSkill(id, "git:github.com/obra/superpowers@b36e0829c6d0140e93cfef2ca599b1b07d4a7797");
   }
   for (const id of ["configure-koni", "model-koni-work", "operate-koni"] as const) {
     await addSkill(id, "npm:@koni/core", path.resolve(repositoryRoot, "packages/core/skills", id));
@@ -11355,7 +11355,10 @@ async function fixturePiInventory(root: string): Promise<PiResolvedInventory> {
   resources.sort((left, right) => left.id.localeCompare(right.id));
   return {
     settings: {
-      packages: ["git:github.com/obra/superpowers", "npm:@koni/core"],
+      packages: [
+        "git:github.com/obra/superpowers@b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+        "npm:@koni/core",
+      ],
       extensions: [],
       skills: [],
       prompts: [],

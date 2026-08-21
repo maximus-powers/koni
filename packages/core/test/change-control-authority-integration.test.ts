@@ -1976,13 +1976,18 @@ async function fixturePiInventory(): Promise<PiResolvedInventory> {
       relativePath: coreSkill ? `dist/skills/${id}/SKILL.md` : `skills/${id}/SKILL.md`,
       absolutePath,
       content,
-      source: coreSkill ? "npm:@koni/core" : "git:github.com/obra/superpowers",
+      source: coreSkill
+        ? "npm:@koni/core"
+        : "git:github.com/obra/superpowers@b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
       scope: "project",
     });
   }
   return {
     settings: {
-      packages: ["git:github.com/obra/superpowers", "npm:@koni/core"],
+      packages: [
+        "git:github.com/obra/superpowers@b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+        "npm:@koni/core",
+      ],
       extensions: [],
       skills: [],
       prompts: [],

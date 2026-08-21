@@ -26,8 +26,22 @@ const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 const execFileAsync = promisify(execFile);
 const stockPiVersion = "0.80.10";
 const stockTypeboxVersion = "1.1.38";
-const superpowersPackageSource = "git:github.com/obra/superpowers";
+const superpowersCommit = "b36e0829c6d0140e93cfef2ca599b1b07d4a7797";
+const superpowersPackageSource = `git:github.com/obra/superpowers@${superpowersCommit}`;
 const superpowersCloneUrl = "https://github.com/obra/superpowers";
+const { parseGitUrl } = await import(
+  pathToFileURL(
+    path.join(
+      repositoryRoot,
+      "node_modules",
+      "@earendil-works",
+      "pi-coding-agent",
+      "dist",
+      "utils",
+      "git.js",
+    ),
+  ).href
+);
 const publicPackages = new Map([
   ["@koni/core", "core"],
   ["@koni/coding-profile", "coding-profile"],
@@ -60,11 +74,23 @@ const offlineSuperpowersSkillIds = [
 test("the package rehearsal resolves the exact required Git package from a network-sealed fixture", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "koni-hermetic-git-package-"));
   try {
+    assert.deepEqual(parseGitUrl(superpowersPackageSource), {
+      type: "git",
+      repo: superpowersCloneUrl,
+      host: "github.com",
+      path: "obra/superpowers",
+      ref: superpowersCommit,
+      pinned: true,
+    });
     const fixture = await createHermeticSuperpowersGitFixture(root);
     const clone = path.join(root, "resolved-superpowers");
-    await execFileAsync("git", ["clone", superpowersCloneUrl, clone], {
-      env: providerFreeEnvironment(fixture.environment),
-    });
+    await execFileAsync(
+      "git",
+      ["clone", "--branch", superpowersCommit, superpowersCloneUrl, clone],
+      {
+        env: providerFreeEnvironment(fixture.environment),
+      },
+    );
     assert.deepEqual(
       (await readdir(path.join(clone, "skills"))).sort(),
       offlineSuperpowersSkillIds,
@@ -74,6 +100,16 @@ test("the package rehearsal resolves the exact required Git package from a netwo
       (await execFileAsync("git", ["remote", "get-url", "origin"], { cwd: clone })).stdout.trim(),
       superpowersCloneUrl,
       "the local transport substitution must preserve the production package identity",
+    );
+    assert.equal(
+      (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: clone })).stdout.trim(),
+      fixture.commitOid,
+      "the immutable package ref must resolve to the fixture's exact commit",
+    );
+    assert.equal(
+      (await execFileAsync("git", ["rev-parse", "HEAD^{tree}"], { cwd: clone })).stdout.trim(),
+      fixture.treeOid,
+      "the resolved commit must retain the fixture's exact skill content identity",
     );
     await assert.rejects(
       execFileAsync("git", ["clone", `${superpowersCloneUrl}-fork`, path.join(root, "forbidden")], {
@@ -115,6 +151,13 @@ async function createHermeticSuperpowersGitFixture(root) {
     ],
     { cwd: repository },
   );
+  await execFileAsync("git", ["tag", superpowersCommit], { cwd: repository });
+  const commitOid = (
+    await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: repository })
+  ).stdout.trim();
+  const treeOid = (
+    await execFileAsync("git", ["rev-parse", "HEAD^{tree}"], { cwd: repository })
+  ).stdout.trim();
 
   const localCloneUrl = pathToFileURL(repository).href;
   for (const [key, value] of [
@@ -130,6 +173,8 @@ async function createHermeticSuperpowersGitFixture(root) {
   return {
     repository,
     config,
+    commitOid,
+    treeOid,
     environment: {
       GIT_CONFIG_GLOBAL: config,
       GIT_CONFIG_NOSYSTEM: "1",
@@ -405,7 +450,7 @@ test(
         root,
         environment: piEnvironment,
       });
-      await assertHermeticSuperpowersResolution(project);
+      await assertHermeticSuperpowersResolution(project, gitPackageFixture);
       assert.deepEqual(
         JSON.parse(await readFile(path.join(project, ".pi", "settings.json"), "utf8")).packages,
         [superpowersPackageSource],
@@ -534,7 +579,7 @@ test(
         root,
         environment: piEnvironment,
       });
-      await assertHermeticSuperpowersResolution(cliProject);
+      await assertHermeticSuperpowersResolution(cliProject, gitPackageFixture);
 
       const piStateBeforeSession = await snapshotTree(agent);
       await constructAndAbortAgentSession({
@@ -3655,7 +3700,7 @@ process.stdout.write(JSON.stringify(resolved.skills.map(({ path }) => path).sort
   );
 }
 
-async function assertHermeticSuperpowersResolution(project) {
+async function assertHermeticSuperpowersResolution(project, fixture) {
   const clone = path.join(project, ".pi", "git", "github.com", "obra", "superpowers");
   assert.deepEqual(
     JSON.parse(await readFile(path.join(project, ".pi", "settings.json"), "utf8")).packages,
@@ -3676,6 +3721,16 @@ async function assertHermeticSuperpowersResolution(project) {
     (await execFileAsync("git", ["remote", "get-url", "origin"], { cwd: clone })).stdout.trim(),
     superpowersCloneUrl,
     "the sealed local transport must preserve the production package origin",
+  );
+  assert.equal(
+    (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: clone })).stdout.trim(),
+    fixture.commitOid,
+    "stock Pi must resolve the immutable package ref to the exact fixture commit",
+  );
+  assert.equal(
+    (await execFileAsync("git", ["rev-parse", "HEAD^{tree}"], { cwd: clone })).stdout.trim(),
+    fixture.treeOid,
+    "stock Pi's resolved package must retain the exact reviewed skill content identity",
   );
 }
 

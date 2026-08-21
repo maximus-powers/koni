@@ -49,7 +49,8 @@ const INSTALL_METADATA_PATH = ".managed/install.json";
 const LIFECYCLE_METADATA_PATH = ".managed/lifecycle.json";
 const PI_SETTINGS_OWNERSHIP_PATH = ".managed/pi-settings.json";
 const PROFILE_LOCK_PATH = ".managed/profile-lifecycle.lock";
-export const REQUIRED_SUPERPOWERS_PI_PACKAGE = "git:github.com/obra/superpowers" as const;
+export const REQUIRED_SUPERPOWERS_PI_PACKAGE =
+  "git:github.com/obra/superpowers@b36e0829c6d0140e93cfef2ca599b1b07d4a7797" as const;
 const PI_SETTINGS_OWNERSHIP_PROTOCOL = "koni.pi-settings-ownership.v1" as const;
 const profileLifecycleContext = new AsyncLocalStorage<{
   configRoot: string;

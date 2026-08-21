@@ -11,6 +11,7 @@ import {
   installProfile,
   previewProfileInstall,
   readProfileLifecycle,
+  REQUIRED_SUPERPOWERS_PI_PACKAGE,
   type ProfileInstallError,
 } from "../src/profile/install.js";
 import { rawSha256 } from "../src/shared/canonical.js";
@@ -23,6 +24,12 @@ afterEach(async () => {
 }, 30_000);
 
 describe("profile installation and guarded upgrades", () => {
+  it("pins the required Superpowers package to the reviewed upstream commit", () => {
+    expect(REQUIRED_SUPERPOWERS_PI_PACKAGE).toBe(
+      "git:github.com/obra/superpowers@b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+    );
+  });
+
   it("materializes a verified profile and merges the required Pi package", async () => {
     const project = await temporary("project");
     await mkdir(path.join(project, ".pi"), { recursive: true });
@@ -38,7 +45,7 @@ describe("profile installation and guarded upgrades", () => {
     expect(result.added).toContain("project.yaml");
     expect(JSON.parse(await readFile(path.join(project, ".pi", "settings.json"), "utf8"))).toEqual({
       theme: "user-owned",
-      packages: ["git:github.com/obra/superpowers"],
+      packages: [REQUIRED_SUPERPOWERS_PI_PACKAGE],
     });
     expect(await readFile(path.join(project, ".pi", "auth.json"), "utf8")).toBe(
       '{"credential":"user-owned"}\n',
@@ -62,13 +69,13 @@ describe("profile installation and guarded upgrades", () => {
     await mkdir(path.join(project, ".pi"), { recursive: true });
     await writeFile(
       path.join(project, ".pi", "settings.json"),
-      `${JSON.stringify({ packages: ["git:github.com/obra/superpowers"], theme: "user-owned" })}\n`,
+      `${JSON.stringify({ packages: [REQUIRED_SUPERPOWERS_PI_PACKAGE], theme: "user-owned" })}\n`,
     );
 
     await installProfile(project, codingProfile);
 
     expect(JSON.parse(await readFile(path.join(project, ".pi", "settings.json"), "utf8"))).toEqual({
-      packages: ["git:github.com/obra/superpowers"],
+      packages: [REQUIRED_SUPERPOWERS_PI_PACKAGE],
       theme: "user-owned",
     });
   }, 30_000);

@@ -13,7 +13,7 @@ import {
 const inventory: PiResolvedInventory = {
   settings: {
     packages: [
-      "git:github.com/obra/superpowers",
+      "git:github.com/obra/superpowers@b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
       { source: "npm:pi-safe-tools", extensions: ["extensions/search.ts"] },
     ],
     skills: [],
@@ -61,7 +61,7 @@ const agents: PiAgentCatalog = {
         skills: ["skills/using-superpowers/**", "skills/brainstorming/**"],
         packages: [
           {
-            source: "git:github.com/obra/superpowers",
+            source: "git:github.com/obra/superpowers@b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
             skills: ["skills/using-superpowers/**", "skills/brainstorming/**"],
             extensions: [],
           },
@@ -220,7 +220,10 @@ describe("Pi-native Koni agent configuration", () => {
           settings: {
             packages: [
               { source: "npm:not-installed", skills: ["skills/rogue/**"] },
-              { source: "git:github.com/obra/superpowers", skills: ["skills/not-real/**"] },
+              {
+                source: "git:github.com/obra/superpowers@b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
+                skills: ["skills/not-real/**"],
+              },
             ],
           },
         },
@@ -279,7 +282,7 @@ function resource(
         ? "project"
         : kind === "extension"
           ? "npm:pi-safe-tools"
-          : "git:github.com/obra/superpowers",
+          : "git:github.com/obra/superpowers@b36e0829c6d0140e93cfef2ca599b1b07d4a7797",
     scope: "project" as const,
   };
 }
