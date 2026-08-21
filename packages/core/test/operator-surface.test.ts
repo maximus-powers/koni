@@ -15,6 +15,7 @@ import {
 import { createKoniCoreExtension } from "../src/extension.js";
 import { AuthorityServer } from "../src/authority/server.js";
 import {
+  authorityDaemonEnvironment,
   createProjectRun,
   ensureProjectAuthority,
   launchAuthorityDaemon,
@@ -38,6 +39,22 @@ afterEach(async () => {
   await Promise.all(
     temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
+});
+
+describe("provider-free authority launch containment", () => {
+  it("self-seals the detached authority environment after resource resolution", () => {
+    const environment = authorityDaemonEnvironment(
+      { KONI_PI_PACKAGE_ROOT: "/exact/pi/runtime" },
+      true,
+    );
+
+    expect(environment).toMatchObject({
+      KONI_PI_PACKAGE_ROOT: "/exact/pi/runtime",
+      KONI_PROVIDER_FREE_RELEASE_PROBE: "1",
+      NODE_ENV: "test",
+      PI_OFFLINE: "1",
+    });
+  });
 });
 
 describe("Pi operator extension", () => {

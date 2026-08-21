@@ -581,18 +581,18 @@ export async function launchAuthorityDaemon(input: {
         cwd: endpoint.identity.worktreeRoot,
         detached: true,
         stdio: ["ignore", log.fd, log.fd],
-        env: authorityDaemonEnvironment({
-          ...piPeerRuntime.environment,
-          ...(activeInstallation === undefined
-            ? {}
-            : activeInstallationEnvironment(activeInstallation)),
-          [KONI_RUNTIME_CLOSURE_ENV]: runtimeClosurePin.closureSha256,
-          [KONI_RUNTIME_PIN_PATH_ENV]: runtimeClosurePin.path,
-          [KONI_RUNTIME_PIN_SHA256_ENV]: runtimeClosurePin.pinSha256,
-          ...(input.providerFreeAdmissionProbe === true
-            ? { KONI_PROVIDER_FREE_RELEASE_PROBE: "1", NODE_ENV: "test" }
-            : {}),
-        }),
+        env: authorityDaemonEnvironment(
+          {
+            ...piPeerRuntime.environment,
+            ...(activeInstallation === undefined
+              ? {}
+              : activeInstallationEnvironment(activeInstallation)),
+            [KONI_RUNTIME_CLOSURE_ENV]: runtimeClosurePin.closureSha256,
+            [KONI_RUNTIME_PIN_PATH_ENV]: runtimeClosurePin.path,
+            [KONI_RUNTIME_PIN_SHA256_ENV]: runtimeClosurePin.pinSha256,
+          },
+          input.providerFreeAdmissionProbe === true,
+        ),
       },
     );
   } finally {
@@ -608,13 +608,22 @@ export async function launchAuthorityDaemon(input: {
   return { ...(child.pid === undefined ? {} : { pid: child.pid }), exited };
 }
 
-function authorityDaemonEnvironment(
+/** @internal Exported only for a mutation-catching process-boundary regression. */
+export function authorityDaemonEnvironment(
   piEnvironment: Readonly<Record<string, string>>,
+  providerFreeAdmissionProbe = false,
 ): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {
     ...process.env,
     ...piEnvironment,
     KONI_AUTHORITY_DAEMON: "1",
+    ...(providerFreeAdmissionProbe
+      ? {
+          KONI_PROVIDER_FREE_RELEASE_PROBE: "1",
+          NODE_ENV: "test",
+          PI_OFFLINE: "1",
+        }
+      : {}),
   };
   // The exact peer bridge is an argv preload above. Never forward ambient Node injection into the
   // authority process, even when the interactive launcher itself was started through NODE_OPTIONS.
