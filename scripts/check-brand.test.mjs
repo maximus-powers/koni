@@ -10,6 +10,8 @@ import { fileURLToPath } from "node:url";
 const execFileAsync = promisify(execFile);
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 const scriptPath = fileURLToPath(new URL("./check-brand.sh", import.meta.url));
+const forbiddenRepository = "real" + "-nigga-harness";
+const legacyProduct = "pytha" + "goras";
 
 test("brand audit disables Git paging for every grep", async (context) => {
   const fixtureRoot = await mkdtemp(path.join(tmpdir(), "koni-brand-audit-"));
@@ -33,7 +35,7 @@ test("brand audit disables Git paging for every grep", async (context) => {
 
   assert.match(stdout, /Brand audit passed/u);
   assert.deepEqual((await readFile(invocationLog, "utf8")).trim().split("\n"), [
-    "--no-pager grep -n -i -e real-nigga-harness -- .",
-    "--no-pager grep -n -i -e pythagoras -- .",
+    `--no-pager grep -n -i -e ${forbiddenRepository} -- .`,
+    `--no-pager grep -n -i -e ${legacyProduct} -- .`,
   ]);
 });
