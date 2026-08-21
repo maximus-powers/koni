@@ -343,6 +343,10 @@ test(
       );
       const launcherEnvironment = {
         ...piEnvironment,
+        // Exact Git installation is complete before provider-free Koni processes start. Restore
+        // stock Pi's offline boundary so authorities, TUIs, and duplicate-source diagnostics cannot
+        // refresh model/provider state while still reusing the already-resolved project package.
+        PI_OFFLINE: "1",
         PATH: `${path.dirname(launcher)}${path.delimiter}${path.dirname(pi)}${path.delimiter}${piEnvironment.PATH ?? ""}`,
       };
       const commandName = process.platform === "win32" ? "koni.cmd" : "koni";
@@ -543,7 +547,7 @@ test(
         "provider-free sessions and the quiesced standalone authority must not alter ambient Pi state",
       );
 
-      await assertLegacyDuplicateCoreIsInert({ pi, agent, root, environment: piEnvironment });
+      await assertLegacyDuplicateCoreIsInert({ pi, agent, root, environment: launcherEnvironment });
       await assertAmbientPreserved(agent, ambientPackage, ambientBefore, archives);
       await stopDisposableAuthority(project);
       await stopDisposableAuthority(cliProject);
