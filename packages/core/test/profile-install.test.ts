@@ -7,6 +7,7 @@ import type {
   ProfilePackageManifest,
 } from "../src/contracts/profile-package.js";
 import { computeProfileBundleSha256 } from "../src/compiler/profile-package.js";
+import { FileTransactionStore } from "../src/authority/file-journal.js";
 import {
   installProfile,
   previewProfileInstall,
@@ -19,6 +20,7 @@ import { rawSha256 } from "../src/shared/canonical.js";
 const roots: string[] = [];
 const codingProfile = path.resolve(import.meta.dirname, "../../coding-profile");
 const legacySuperpowersPackage = "git:github.com/obra/superpowers";
+const piSettingsTransitionProtocol = "koni.pi-settings-transition.v1";
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -173,6 +175,71 @@ describe("profile installation and guarded upgrades", () => {
     expect(await readFile(ownershipPath)).toEqual(ownershipBefore);
     expect(await readFile(installPath)).toEqual(installBefore);
   });
+
+  it.each(["initial", "legacy"] as const)(
+    "cold-recovers every %s Pi-settings crash boundary",
+    async (kind) => {
+      for (const boundary of [
+        "before_external_rename",
+        "after_external_rename",
+        "before_internal_commit",
+        "after_internal_commit",
+      ] as const) {
+        const fixture = await piSettingsCrashFixture(kind, boundary);
+        if (boundary === "before_external_rename" || boundary === "after_external_rename") {
+          await expect(stat(fixture.mainTransactionPath)).rejects.toMatchObject({ code: "ENOENT" });
+        } else {
+          expect((await stat(fixture.mainTransactionPath)).isDirectory()).toBe(true);
+        }
+
+        await installProfile(fixture.project, codingProfile);
+
+        expect(await readFile(fixture.settingsPath)).toEqual(fixture.desiredSettingsBytes);
+        expect(await readFile(fixture.ownershipPath)).toEqual(fixture.desiredOwnershipBytes);
+        await expect(stat(fixture.transitionPath)).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(stat(fixture.mainTransactionPath)).rejects.toMatchObject({ code: "ENOENT" });
+        expect(JSON.parse(await readFile(fixture.settingsPath, "utf8")).packages).toContain(
+          REQUIRED_SUPERPOWERS_PI_PACKAGE,
+        );
+      }
+    },
+    30_000,
+  );
+
+  it("preserves an unrelated Pi-settings change and its recovery authority", async () => {
+    const fixture = await piSettingsCrashFixture("legacy", "overlapping_main_prepared");
+    const unrelatedSettings = Buffer.from(
+      `${JSON.stringify({ packages: [legacySuperpowersPackage], theme: "changed-after-prepare" })}\n`,
+    );
+    await writeFile(fixture.settingsPath, unrelatedSettings);
+    const transitionBefore = await readFile(fixture.transitionPath);
+    const journalPath = path.join(
+      fixture.project,
+      ".koni",
+      ".transactions",
+      "profile-crash-main",
+      "journal.json",
+    );
+    const journalBefore = await readFile(journalPath);
+
+    await expect(installProfile(fixture.project, codingProfile)).rejects.toMatchObject({
+      code: "pi_settings_changed",
+    } satisfies Partial<ProfileInstallError>);
+    expect(await readFile(fixture.settingsPath)).toEqual(unrelatedSettings);
+    expect(await readFile(fixture.transitionPath)).toEqual(transitionBefore);
+    expect(await readFile(journalPath)).toEqual(journalBefore);
+  }, 30_000);
+
+  it("converges a pre-existing main journal only after its external transition", async () => {
+    const fixture = await piSettingsCrashFixture("legacy", "overlapping_main_prepared");
+
+    await installProfile(fixture.project, codingProfile);
+
+    expect(await readFile(fixture.settingsPath)).toEqual(fixture.desiredSettingsBytes);
+    expect(await readFile(fixture.ownershipPath)).toEqual(fixture.desiredOwnershipBytes);
+    await expect(stat(fixture.transitionPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(stat(fixture.mainTransactionPath)).rejects.toMatchObject({ code: "ENOENT" });
+  }, 30_000);
 
   it("previews without creating a lock, transaction, or .koni tree", async () => {
     const project = await temporary("project");
@@ -360,6 +427,115 @@ async function legacyKoniOwnedPiPackageProject(): Promise<string> {
     })}\n`,
   );
   return project;
+}
+
+async function piSettingsCrashFixture(
+  kind: "initial" | "legacy",
+  boundary:
+    | "before_external_rename"
+    | "after_external_rename"
+    | "before_internal_commit"
+    | "after_internal_commit"
+    | "overlapping_main_prepared",
+) {
+  const project =
+    kind === "legacy"
+      ? await legacyKoniOwnedPiPackageProject()
+      : await temporary("initial-pi-settings-crash");
+  const settingsPath = path.join(project, ".pi", "settings.json");
+  const ownershipPath = path.join(project, ".koni", ".managed", "pi-settings.json");
+  if (kind === "initial") {
+    await mkdir(path.dirname(settingsPath), { recursive: true });
+    await mkdir(path.dirname(ownershipPath), { recursive: true });
+    await writeFile(settingsPath, `${JSON.stringify({ theme: "user-owned" })}\n`);
+  }
+  const expectedSettingsBytes = await readFile(settingsPath);
+  const expectedOwnershipBytes = kind === "legacy" ? await readFile(ownershipPath) : undefined;
+  const desiredSettings = JSON.parse(expectedSettingsBytes.toString("utf8")) as {
+    packages?: string[];
+    theme: string;
+  };
+  if (kind === "legacy") {
+    desiredSettings.packages = desiredSettings.packages!.map((entry) =>
+      entry === legacySuperpowersPackage ? REQUIRED_SUPERPOWERS_PI_PACKAGE : entry,
+    );
+  } else {
+    desiredSettings.packages = [REQUIRED_SUPERPOWERS_PI_PACKAGE];
+  }
+  const desiredSettingsBytes = Buffer.from(`${JSON.stringify(desiredSettings, null, 2)}\n`);
+  const desiredOwnershipBytes = Buffer.from(
+    `${JSON.stringify(
+      {
+        protocol: "koni.pi-settings-ownership.v1",
+        source: REQUIRED_SUPERPOWERS_PI_PACKAGE,
+        managed: true,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  const coordinationRoot = path.join(project, ".koni", ".managed", "pi-settings-coordination");
+  const transitionPath = path.join(coordinationRoot, "transition.json");
+  const mainTransactionPath = path.join(project, ".koni", ".transactions", "profile-crash-main");
+  const transitionBytes = Buffer.from(
+    `${JSON.stringify(
+      {
+        protocol: piSettingsTransitionProtocol,
+        expectedSettingsSha256: rawSha256(expectedSettingsBytes),
+        desiredSettingsSha256: rawSha256(desiredSettingsBytes),
+        desiredSettingsBase64: desiredSettingsBytes.toString("base64"),
+        expectedOwnershipSha256:
+          expectedOwnershipBytes === undefined ? null : rawSha256(expectedOwnershipBytes),
+        desiredOwnershipSha256: rawSha256(desiredOwnershipBytes),
+        desiredOwnershipBase64: desiredOwnershipBytes.toString("base64"),
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  const coordination = await FileTransactionStore.open(coordinationRoot);
+  await coordination.prepare("pi-settings-crash-transition", [
+    { path: "transition.json", bytes: transitionBytes, expectedSha256: null },
+  ]);
+  await coordination.commit("pi-settings-crash-transition");
+  await coordination.cleanupCommitted("pi-settings-crash-transition");
+
+  if (boundary !== "before_external_rename") {
+    await writeFile(settingsPath, desiredSettingsBytes);
+  }
+  if (boundary === "before_internal_commit" || boundary === "after_internal_commit") {
+    await writeFile(ownershipPath, desiredOwnershipBytes);
+    await rm(transitionPath);
+    const main = await FileTransactionStore.open(path.join(project, ".koni"));
+    await main.prepare("profile-crash-main", [
+      {
+        path: ".managed/crash-boundary.json",
+        bytes: Buffer.from('{"prepared":true}\n'),
+        expectedSha256: null,
+      },
+    ]);
+    if (boundary === "after_internal_commit") await main.commit("profile-crash-main");
+  }
+  if (boundary === "overlapping_main_prepared") {
+    const main = await FileTransactionStore.open(path.join(project, ".koni"));
+    await main.prepare("profile-crash-main", [
+      {
+        path: ".managed/pi-settings.json",
+        bytes: desiredOwnershipBytes,
+        expectedSha256:
+          expectedOwnershipBytes === undefined ? null : rawSha256(expectedOwnershipBytes),
+      },
+    ]);
+  }
+  return {
+    project,
+    settingsPath,
+    ownershipPath,
+    transitionPath,
+    mainTransactionPath,
+    desiredSettingsBytes,
+    desiredOwnershipBytes,
+  };
 }
 
 async function syntheticProfile(

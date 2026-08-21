@@ -42,6 +42,10 @@ import {
   type ProfileRetirementPlan,
   type ProfileRetirementPreview,
 } from "./semantic-retirement.js";
+import {
+  PiSettingsTransitionCoordinator,
+  PiSettingsTransitionError,
+} from "./pi-settings-transition.js";
 
 const INSTALL_PROTOCOL = "koni.profile-install.v1" as const;
 const LIFECYCLE_PROTOCOL = "koni.profile-lifecycle.v1" as const;
@@ -197,7 +201,6 @@ interface MaterializationPlan {
 }
 
 interface PiSettingsMergePlan {
-  readonly settingsPath: string;
   readonly expectedSettingsSha256: Sha256Digest | null;
   readonly settingsBytes?: Uint8Array;
   readonly ownershipWrite: TransactionWrite;
@@ -338,6 +341,9 @@ export async function installProfile(
   }
 
   return withProfileLifecycleLock(configRoot, async () => {
+    await assertOptionalRealPiRoot(path.join(project, ".pi"), project);
+    const piSettingsCoordinator = await PiSettingsTransitionCoordinator.open(project, configRoot);
+    await recoverPiSettingsTransition(piSettingsCoordinator);
     const store = await FileTransactionStore.open(configRoot);
     await store.recoverPrepared();
     const plan = await buildMaterializationPlan(configRoot, baseline, options, true);
@@ -357,12 +363,53 @@ export async function installProfile(
       }
     }
     const transactionId = `profile-${plan.preview.generation}-${randomUUID()}`;
-    await store.prepare(transactionId, [...plan.writes, piSettings.ownershipWrite], plan.deletes);
-    await applyPiSettingsMerge(piSettings);
+    const writes = [...plan.writes];
+    if (piSettings.settingsBytes === undefined) {
+      writes.push(piSettings.ownershipWrite);
+    } else {
+      const expectedOwnershipSha256 = piSettings.ownershipWrite.expectedSha256;
+      if (
+        expectedOwnershipSha256 !== null &&
+        (typeof expectedOwnershipSha256 !== "string" || !isSha256Digest(expectedOwnershipSha256))
+      ) {
+        throw new ProfileInstallError(
+          "pi_settings_ownership_invalid",
+          "Pi settings ownership preimage is invalid",
+        );
+      }
+      try {
+        await piSettingsCoordinator.stage({
+          expectedSettingsSha256: piSettings.expectedSettingsSha256,
+          desiredSettingsBytes: piSettings.settingsBytes,
+          expectedOwnershipSha256,
+          desiredOwnershipBytes: piSettings.ownershipWrite.bytes,
+        });
+        await piSettingsCoordinator.recover();
+      } catch (error) {
+        if (error instanceof PiSettingsTransitionError) {
+          throw new ProfileInstallError(error.code, error.message);
+        }
+        throw error;
+      }
+    }
+    await store.prepare(transactionId, writes, plan.deletes);
     await store.commit(transactionId);
     await store.cleanupCommitted(transactionId);
     return { ...structuredClone(plan.preview), transactionId };
   });
+}
+
+async function recoverPiSettingsTransition(
+  coordinator: PiSettingsTransitionCoordinator,
+): Promise<void> {
+  try {
+    await coordinator.recover();
+  } catch (error) {
+    if (error instanceof PiSettingsTransitionError) {
+      throw new ProfileInstallError(error.code, error.message);
+    }
+    throw error;
+  }
 }
 
 async function preparePiSettingsMerge(
@@ -409,7 +456,6 @@ async function preparePiSettingsMerge(
     packages[packages.indexOf(legacyExact[0]!)] = REQUIRED_SUPERPOWERS_PI_PACKAGE;
     settings.packages = packages;
     return piSettingsMergePlan({
-      settingsPath,
       currentSettingsBytes,
       settingsBytes: jsonBytes(settings),
       currentOwnershipBytes,
@@ -438,7 +484,6 @@ async function preparePiSettingsMerge(
     settingsBytes = jsonBytes(settings);
   }
   return piSettingsMergePlan({
-    settingsPath,
     currentSettingsBytes,
     settingsBytes,
     currentOwnershipBytes,
@@ -447,20 +492,17 @@ async function preparePiSettingsMerge(
 }
 
 function piSettingsMergePlan({
-  settingsPath,
   currentSettingsBytes,
   settingsBytes,
   currentOwnershipBytes,
   managed,
 }: Readonly<{
-  settingsPath: string;
   currentSettingsBytes: Uint8Array | undefined;
   settingsBytes: Uint8Array | undefined;
   currentOwnershipBytes: Uint8Array | undefined;
   managed: boolean;
 }>): PiSettingsMergePlan {
   return {
-    settingsPath,
     expectedSettingsSha256:
       currentSettingsBytes === undefined ? null : rawSha256(currentSettingsBytes),
     ...(settingsBytes === undefined ? {} : { settingsBytes }),
@@ -474,33 +516,6 @@ function piSettingsMergePlan({
       expectedSha256: currentOwnershipBytes === undefined ? null : rawSha256(currentOwnershipBytes),
     },
   };
-}
-
-async function applyPiSettingsMerge(plan: PiSettingsMergePlan): Promise<void> {
-  if (plan.settingsBytes === undefined) return;
-  const piRoot = path.dirname(plan.settingsPath);
-  await mkdir(piRoot, { recursive: true, mode: 0o700 });
-  const current = await readOptionalFile(plan.settingsPath);
-  const currentSha256 = current === undefined ? null : rawSha256(current);
-  if (currentSha256 !== plan.expectedSettingsSha256) {
-    throw new ProfileInstallError(
-      "pi_settings_changed",
-      "Pi settings changed while the profile update was being prepared",
-    );
-  }
-  const temporaryPath = path.join(piRoot, `.settings.json.koni-${randomUUID()}.tmp`);
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
-  try {
-    handle = await open(temporaryPath, "wx", 0o600);
-    await handle.writeFile(plan.settingsBytes);
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await rename(temporaryPath, plan.settingsPath);
-  } finally {
-    await handle?.close();
-    await rm(temporaryPath, { force: true });
-  }
 }
 
 function parsePiSettingsOwnership(
