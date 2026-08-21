@@ -11,8 +11,8 @@ work through the real Pi/TUI workflow.
 generalizable Koni defects test-first; then install the exact archives in fresh smoke roots and run
 both profiles through the left cmux Pi/TUI to non-destructive promotion readiness.
 
-**Tech Stack:** TypeScript, Vitest, Node.js 22.19 and 24, npm 11.13, Pi 0.80.10, TypeBox 1.1.38,
-Git worktrees, cmux terminal control.
+**Tech Stack:** TypeScript, Vitest, Node.js 22.19 and 24, npm 11.13, Pi 0.80.10, TypeBox 1.1.38, Git
+worktrees, cmux terminal control.
 
 **Spec:** Approved in-thread plan from 2026-08-20; no separate design document.
 
@@ -79,8 +79,8 @@ Git worktrees, cmux terminal control.
 
 - [ ] Diagnose any full-suite non-termination, leaked handles, shared fixture state, or namespace
       collision until the complete suite exits deterministically.
-- [ ] Add Node 24 beside Node 22.19 in CI while retaining macOS and Ubuntu coverage and the pinned Pi,
-      TypeBox, and npm versions.
+- [ ] Add Node 24 beside Node 22.19 in CI while retaining macOS and Ubuntu coverage and the pinned
+      Pi, TypeBox, and npm versions.
 - [ ] Run `npm run check` and `npm test` twice consecutively on the clean candidate.
 - [ ] Run exact package smoke twice on Node 22.19 and Node 24.
 - [ ] Update maturity and operator documentation to state the qualified autonomy, model, platform,
