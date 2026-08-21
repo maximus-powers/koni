@@ -803,14 +803,26 @@ async function commitDisposableKoniConfiguration(project, message) {
   });
   const changes = status.stdout.split("\n").filter(Boolean);
   assert.ok(changes.length > 0, `${message} expected a project-authored Koni change`);
-  assert.equal(
-    changes.every((line) => {
-      const target = line.slice(3);
-      return target.startsWith(".koni/") || target === ".pi/settings.json";
-    }),
-    true,
-    `package rehearsal configuration commit escaped Koni's owned surfaces: ${changes.join(", ")}`,
+  const piGitCacheGuard = ".pi/git/.gitignore";
+  const piCacheGuardPresent = changes.some((line) => line === `?? ${piGitCacheGuard}`);
+  const escaped = changes.filter((line) => {
+    const target = line.slice(3);
+    return (
+      !target.startsWith(".koni/") && target !== ".pi/settings.json" && target !== piGitCacheGuard
+    );
+  });
+  assert.deepEqual(
+    escaped,
+    [],
+    `package rehearsal configuration commit observed an unexpected authored surface: ${changes.join(", ")}`,
   );
+  if (piCacheGuardPresent) {
+    assert.equal(
+      await readFile(path.join(project, piGitCacheGuard), "utf8"),
+      "*\n!.gitignore\n",
+      "stock Pi's project package cache must retain its exact ignore guard",
+    );
+  }
   await execFileAsync("git", ["add", ".koni", ".pi/settings.json"], { cwd: project });
   await execFileAsync(
     "git",
@@ -826,6 +838,16 @@ async function commitDisposableKoniConfiguration(project, message) {
     ],
     { cwd: project },
   );
+  if (piCacheGuardPresent) {
+    const after = await execFileAsync("git", ["status", "--short", "--untracked-files=all"], {
+      cwd: project,
+    });
+    assert.equal(
+      after.stdout.trim(),
+      `?? ${piGitCacheGuard}`,
+      "a Koni configuration commit must leave Pi's exact package-cache guard untracked",
+    );
+  }
 }
 
 async function exactArchives(root) {
