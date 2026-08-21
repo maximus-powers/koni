@@ -3622,7 +3622,7 @@ process.stdout.write(JSON.stringify(resolved.skills.map(({ path }) => path).sort
   const resolvedSkillPaths = JSON.parse(result.stdout);
   assert.deepEqual(
     resolvedSkillPaths.filter((skillPath) => skillPath.startsWith(`${clone}${path.sep}`)),
-    offlineSuperpowersSkillIds.map((id) => path.join(clone, "skills", id)),
+    offlineSuperpowersSkillIds.map((id) => path.join(clone, "skills", id, "SKILL.md")),
     "the exact configured package must resolve all and only the required fixture skill paths",
   );
 }
