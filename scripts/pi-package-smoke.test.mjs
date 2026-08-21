@@ -3065,7 +3065,13 @@ const ui = {
       assert.match(ready, /Start (?:Planning|Work)/u);
       frames.guidedReady = ready;
       component.handleInput("\\r");
-      await waitFor(() => result, "guided run modal Start");
+      await waitFor(() => {
+        const state = component.state;
+        if (!state.busy && state.error !== undefined) {
+          throw new Error("guided run modal rejected Start: " + state.error);
+        }
+        return result;
+      }, "guided run modal Start");
       assert.equal(result.kind, "started");
       assert.equal(result.state.objective, objective);
     } else if (kind === "RunsOverlayComponent") {
