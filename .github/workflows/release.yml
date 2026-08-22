@@ -22,21 +22,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.13.1
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-          cache: npm
+          cache: pnpm
       - run: npm install --global npm@11.13.0
       - run: sudo apt-get update && sudo apt-get install -y bubblewrap
-      - run: npm ci
+      - run: pnpm install --frozen-lockfile
       - name: Verify tag matches Core
         run:
           node -e 'const v=require("./packages/core/package.json").version; if
           (process.env.GITHUB_REF_NAME !== `v${v}`) process.exit(1)'
-      - run: npm run check
+      - run: pnpm check
       - name: Build and audit the tested Pi host boundary
         run: |
-          npm run build
+          pnpm build
           node --test scripts/pi-host-boundary.test.mjs
           node scripts/check-pi-host-boundary.mjs --output koni-pi-host-compatibility.json
   package:
@@ -46,14 +49,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.13.1
       - uses: actions/setup-node@v4
         with:
           node-version: 22.19.0
-          cache: npm
+          cache: pnpm
       - run: npm install --global npm@11.13.0
       - run: sudo apt-get update && sudo apt-get install -y bubblewrap
-      - run: npm ci
-      - run: npm run build
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
       - name: Pack the coarse Pi package system
         run: |
           mkdir -p release

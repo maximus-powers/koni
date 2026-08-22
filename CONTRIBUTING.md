@@ -12,13 +12,14 @@ Read [Support](SUPPORT.md) for questions. Report vulnerabilities according to
 
 ## Development setup
 
-Köni uses npm workspaces, Node 22.19 or later, npm 11.13, and Pi 0.80.10.
+Köni uses pnpm 11.13.1 and Turborepo's local cache for source checkout work, Node 22.19 or later,
+npm 11.13.0 for Pi runtime closure materialization, and Pi 0.80.10.
 
 ```sh
 git clone https://github.com/maximus-powers/koni.git
 cd koni
-npm ci
-npm run check
+pnpm install --frozen-lockfile
+pnpm check
 ```
 
 Use `./scripts/install-dev.sh` only when an end-to-end test needs a local Pi package installation.
@@ -30,7 +31,7 @@ Use `./scripts/install-dev.sh` only when an end-to-end test needs a local Pi pac
 3. Update public documentation for visible changes.
 4. Preserve unrelated working-tree changes.
 5. Run the relevant focused tests.
-6. Run `npm run check`.
+6. Run `pnpm check`.
 
 New configuration fields need:
 

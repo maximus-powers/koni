@@ -14,7 +14,8 @@ that same full surface in an explicitly chosen terminal.
 ## Prerequisites
 
 - Node 22.19 or newer
-- npm 11.13.0 for source and npm installs
+- pnpm 11.13.1 for source checkout installs, checks, builds, and local Turborepo caching
+- npm 11.13.0 for Pi installs and source installer's disposable runtime closure
 - Git 2.x
 - An ordinary working Pi 0.80.10 setup, with TypeBox 1.1.38, for agent-backed work
 - macOS Seatbelt or Linux bubblewrap for contained command effects
@@ -70,11 +71,12 @@ export PATH="${KONI_INSTALL_PREFIX:-$HOME/.local}/bin:$PATH"
 koni --version
 ```
 
-The installer uses the ordinary Node and npm that Pi already requires. It checks, packs, and
-installs the same three payloads beneath `${KONI_INSTALL_PREFIX:-$HOME/.local}`. It registers only
-those three versioned local package sources in one locked Pi-settings update. It retains older bytes
-for running authorities and preserves authentication plus every unrelated package and resource
-setting.
+The installer uses Node, pnpm 11.13.1 for source checkout work, and npm 11.13.0 for the disposable
+Pi runtime closure. It checks, packs, and installs the same three payloads beneath
+`${KONI_INSTALL_PREFIX:-$HOME/.local}`. Turborepo reuses only its local source checkout cache. The
+installer registers only those three versioned local package sources in one locked Pi-settings
+update. It retains older bytes for running authorities and preserves authentication plus every
+unrelated package and resource setting.
 
 Provider login and model discovery stay in Pi. Core installs no second credential store and no
 second runtime host. Whichever providers you authenticated in Pi — Anthropic Claude, OpenAI Codex,

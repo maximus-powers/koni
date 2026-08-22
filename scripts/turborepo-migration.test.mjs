@@ -46,3 +46,32 @@ test("Turbo uses only the local cache", async () => {
   const turbo = await readJson("turbo.json");
   assert.equal(Object.hasOwn(turbo, "remoteCache"), false);
 });
+
+test("current source workflows use pnpm for repository orchestration", async () => {
+  const operationalFiles = [
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml",
+    "scripts/install-dev.sh",
+    "CONTRIBUTING.md",
+    "README.md",
+    "docs/getting-started.md",
+  ];
+
+  for (const file of operationalFiles) {
+    const source = await read(file);
+    assert.doesNotMatch(source, /npm ci\b/u, `${file} installs the source checkout with npm`);
+    assert.doesNotMatch(
+      source,
+      /npm run (?:check|build)\b/u,
+      `${file} orchestrates the repository with npm`,
+    );
+  }
+});
+
+test("CI workflows set up and cache the pinned pnpm version", async () => {
+  for (const file of [".github/workflows/ci.yml", ".github/workflows/release.yml"]) {
+    const workflow = await read(file);
+    assert.match(workflow, /uses: pnpm\/action-setup@v4\s*\n\s+with:\s*\n\s+version: 11\.13\.1/u);
+    assert.match(workflow, /cache: pnpm\b/u);
+  }
+});

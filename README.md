@@ -67,7 +67,8 @@ Pi's managed npm closure supplies both the extension and its `.bin/koni` link. T
 your active Pi 0.80.10 package, verifies it, and propagates that exact peer bridge into authority
 and attempt children.
 
-A source checkout uses `./scripts/install-dev.sh`, which builds and registers the same three package
+A source checkout uses `./scripts/install-dev.sh`, which requires pnpm 11.13.1 for source work and
+npm 11.13.0 for its disposable Pi runtime closure, then builds and registers the same three package
 payloads. That installer uses versioned, retained package roots and one locked Pi-settings update,
 so unrelated resources and already-running authority bytes are never overwritten.
 
@@ -193,12 +194,13 @@ do not depend on a Köni source checkout. Unrelated agent-tool and project resou
 ## Development
 
 The shipping workspaces are TypeScript. They target Node `>=22.19`, Pi `0.80.10`, and the TypeBox
-`1.1.38` that this Pi runtime supplies:
+`1.1.38` that this Pi runtime supplies. Source checkout development uses pnpm `11.13.1` and
+Turborepo's local cache:
 
 ```sh
-npm ci
-npm run check
-npm run build
+pnpm install --frozen-lockfile
+pnpm check
+pnpm build
 ```
 
 `npm pack --workspace @koni/core`, plus the same command for the two profile workspaces, produces

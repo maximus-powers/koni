@@ -5,9 +5,10 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 prefix="${KONI_INSTALL_PREFIX:-${HOME}/.local}"
 required_node="22.19.0"
 required_npm="11.13.0"
+required_pnpm="11.13.1"
 
-if ! command -v node >/dev/null || ! command -v npm >/dev/null || ! command -v pi >/dev/null; then
-  echo "Koni requires the user's existing Pi 0.80.10, Node ${required_node}+, and npm ${required_npm}." >&2
+if ! command -v node >/dev/null || ! command -v npm >/dev/null || ! command -v pnpm >/dev/null || ! command -v pi >/dev/null; then
+  echo "Koni requires the user's existing Pi 0.80.10, Node ${required_node}+, pnpm ${required_pnpm}, and npm ${required_npm}." >&2
   exit 1
 fi
 
@@ -24,6 +25,11 @@ node -e '
 
 if [[ "$(npm --version)" != "$required_npm" ]]; then
   echo "Koni development installs require npm ${required_npm}; found $(npm --version)." >&2
+  exit 1
+fi
+
+if [[ "$(pnpm --version)" != "$required_pnpm" ]]; then
+  echo "Koni development installs require pnpm ${required_pnpm}; found $(pnpm --version)." >&2
   exit 1
 fi
 
@@ -90,15 +96,15 @@ package_tmp="$(mktemp -d "${TMPDIR:-/tmp}/koni-packages.XXXXXX")"
 (
   cd "$repo_root"
   if [[ "${KONI_DEV_FAST_INSTALL:-0}" != "1" ]]; then
-    npm ci
-    npm run check
+    pnpm install --frozen-lockfile
+    pnpm check
   else
     echo "Fast development activation: using the caller's already-verified working tree." >&2
   fi
-  npm run build
-  npm pack --workspace @koni/coding-profile --pack-destination "$package_tmp" >/dev/null
-  npm pack --workspace @koni/research-profile --pack-destination "$package_tmp" >/dev/null
-  npm pack --workspace @koni/core --pack-destination "$package_tmp" >/dev/null
+  pnpm build
+  pnpm --filter @koni/coding-profile pack --pack-destination "$package_tmp" >/dev/null
+  pnpm --filter @koni/research-profile pack --pack-destination "$package_tmp" >/dev/null
+  pnpm --filter @koni/core pack --pack-destination "$package_tmp" >/dev/null
 )
 
 packages=()
