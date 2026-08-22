@@ -3,6 +3,7 @@ import { constants, realpathSync } from "node:fs";
 import {
   access,
   chmod,
+  link,
   lstat,
   mkdir,
   open,
@@ -24,6 +25,7 @@ const PACKAGE_RELATIVE_PATH = path.join("npm", "node_modules", "@koni", "core");
 export type GlobalLauncherMutationPoint =
   | "before_launcher_rename"
   | "after_launcher_rename"
+  | "before_launcher_unlink"
   | "before_marker_rename"
   | "after_marker_rename";
 
@@ -118,7 +120,7 @@ export async function activateGlobalLauncher(
     next: activation,
   };
   await publishFileAtomically(journalPath, `${JSON.stringify(journal, null, 2)}\n`, 0o600);
-  await publishLauncher(activation, environment);
+  await publishLauncherConditionally(activation, marker ?? null, environment);
   await publishFileAtomically(markerPath, `${JSON.stringify(activation, null, 2)}\n`, 0o600, {
     before: "before_marker_rename",
     after: "after_marker_rename",
@@ -159,7 +161,10 @@ export async function removeGlobalLauncher(
   const current = await activationFor(environment, launcherPath);
   if (!sameActivation(marker, current) || !(await targetMatchesDigest(marker))) return "not_owner";
   if (launcherExists && !(await launcherMatches(marker, environment.platform))) return "not_owner";
-  if (launcherExists) await unlink(launcherPath);
+  if (launcherExists) {
+    await callMutationHook(environment, "before_launcher_unlink");
+    if (!(await removeLauncherIfOwned(marker, environment.platform))) return "not_owner";
+  }
   await unlink(markerPath);
   await syncDirectory(path.dirname(launcherPath));
   await syncDirectory(path.dirname(markerPath));
@@ -177,6 +182,13 @@ async function recoverPendingActivation(
   if (journal === "malformed") {
     throw new Error(`refusing malformed global launcher journal at ${journalPath}`);
   }
+  if (journal.previous !== null) {
+    await assertRegularTargetWithinPackage(
+      journal.previous.launcherTarget,
+      journal.previous.packageRoot,
+    );
+  }
+  await assertRegularTargetWithinPackage(journal.next.launcherTarget, journal.next.packageRoot);
   if (!(await targetMatchesDigest(journal.next))) {
     throw new Error("refusing global launcher recovery because its intended target changed");
   }
@@ -200,7 +212,9 @@ async function recoverPendingActivation(
   if (!launcherIsNext && !launcherIsPrevious && (launcherExists || journal.previous !== null)) {
     throw new Error(`refusing to overwrite an unrelated koni launcher at ${launcherPath}`);
   }
-  if (!launcherIsNext) await publishLauncher(journal.next, environment, false);
+  if (!launcherIsNext) {
+    await publishLauncherConditionally(journal.next, journal.previous, environment, false);
+  }
   if (marker === undefined || !sameActivation(marker, journal.next)) {
     await publishFileAtomically(markerPath, `${JSON.stringify(journal.next, null, 2)}\n`, 0o600);
   }
@@ -227,7 +241,8 @@ async function activationFor(
 }
 
 async function findSolePiExecutable(environment: GlobalLauncherEnvironment): Promise<string> {
-  const names = environment.platform === "win32" ? ["pi.cmd", "pi.exe", "pi"] : ["pi"];
+  const names =
+    environment.platform === "win32" ? ["pi.com", "pi.exe", "pi.bat", "pi.cmd"] : ["pi"];
   const delimiter = environment.platform === "win32" ? ";" : ":";
   const matches = new Map<string, string>();
   for (const directory of environment.pathValue.split(delimiter)) {
@@ -240,6 +255,7 @@ async function findSolePiExecutable(environment: GlobalLauncherEnvironment): Pro
         if (environment.platform !== "win32") await access(candidate, constants.X_OK);
         const physical = await realpath(candidate);
         if (!matches.has(physical)) matches.set(physical, candidate);
+        if (environment.platform === "win32") break;
       } catch {
         // A PATH entry is a candidate only when it names a runnable regular file.
       }
@@ -468,12 +484,14 @@ async function assertWritableDirectory(directory: string, label: string): Promis
   }
 }
 
-async function publishLauncher(
+async function publishLauncherConditionally(
   activation: GlobalLauncherActivation,
+  previous: GlobalLauncherActivation | null,
   environment: GlobalLauncherEnvironment,
   invokeHooks = true,
 ): Promise<void> {
   const temporary = adjacentTemporary(activation.launcherPath);
+  let displaced: string | undefined;
   try {
     if (environment.platform === "win32") {
       await writeFile(temporary, windowsShim(activation.launcherTarget), {
@@ -485,12 +503,85 @@ async function publishLauncher(
       await symlink(activation.launcherTarget, temporary, "file");
     }
     if (invokeHooks) await callMutationHook(environment, "before_launcher_rename");
-    await rename(temporary, activation.launcherPath);
+    if (previous !== null) {
+      displaced = adjacentTemporary(activation.launcherPath);
+      try {
+        await rename(activation.launcherPath, displaced);
+      } catch {
+        throw unrelatedLauncherError(activation.launcherPath);
+      }
+      if (!(await launcherMatches(atPath(previous, displaced), environment.platform))) {
+        await restoreNoReplace(displaced, activation.launcherPath);
+        displaced = undefined;
+        throw unrelatedLauncherError(activation.launcherPath);
+      }
+    }
+    try {
+      await publishNoReplace(temporary, activation.launcherPath);
+    } catch (error) {
+      if (displaced !== undefined) {
+        await restoreNoReplace(displaced, activation.launcherPath);
+        displaced = undefined;
+      }
+      if (isCode(error, "EEXIST")) throw unrelatedLauncherError(activation.launcherPath);
+      throw error;
+    }
+    if (displaced !== undefined) {
+      await unlink(displaced);
+      displaced = undefined;
+    }
     if (invokeHooks) await callMutationHook(environment, "after_launcher_rename");
     await syncDirectory(path.dirname(activation.launcherPath));
   } finally {
     await unlink(temporary).catch(() => undefined);
   }
+}
+
+async function removeLauncherIfOwned(
+  activation: GlobalLauncherActivation,
+  platform: NodeJS.Platform,
+): Promise<boolean> {
+  const displaced = adjacentTemporary(activation.launcherPath);
+  try {
+    await rename(activation.launcherPath, displaced);
+  } catch {
+    return false;
+  }
+  if (!(await launcherMatches(atPath(activation, displaced), platform))) {
+    await restoreNoReplace(displaced, activation.launcherPath);
+    return false;
+  }
+  await unlink(displaced);
+  return true;
+}
+
+async function publishNoReplace(source: string, destination: string): Promise<void> {
+  const metadata = await lstat(source);
+  if (metadata.isSymbolicLink()) {
+    await symlink(await readlink(source), destination, "file");
+  } else {
+    await link(source, destination);
+  }
+  await unlink(source);
+}
+
+async function restoreNoReplace(source: string, destination: string): Promise<void> {
+  try {
+    await publishNoReplace(source, destination);
+  } catch (error) {
+    if (!isCode(error, "EEXIST")) throw error;
+  }
+}
+
+function atPath(
+  activation: GlobalLauncherActivation,
+  launcherPath: string,
+): GlobalLauncherActivation {
+  return { ...activation, launcherPath };
+}
+
+function unrelatedLauncherError(launcherPath: string): Error {
+  return new Error(`refusing to overwrite an unrelated koni launcher at ${launcherPath}`);
 }
 
 async function publishFileAtomically(

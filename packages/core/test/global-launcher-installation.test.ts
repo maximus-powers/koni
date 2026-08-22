@@ -4,6 +4,7 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  readlink,
   realpath,
   rename,
   rm,
@@ -183,6 +184,7 @@ describe("Pi-owned global launcher installation", () => {
   it("publishes an exact Windows command shim bound by the marker", async () => {
     const fixture = await piUserPackageFixture("windows-shim");
     fixture.environment.platform = "win32";
+    await writeFile(path.join(fixture.piBin, "pi.cmd"), "@ECHO off\r\n");
 
     const activation = await activateGlobalLauncher(fixture.environment);
 
@@ -190,6 +192,29 @@ describe("Pi-owned global launcher installation", () => {
     expect(await readFile(activation!.launcherPath, "utf8")).toBe(
       `@node "${fixture.coreLauncher}" %*\r\n`,
     );
+  });
+
+  it("treats a standard npm Windows shim family as one Pi installation", async () => {
+    const fixture = await piUserPackageFixture("windows-npm-family");
+    fixture.environment.platform = "win32";
+    await writeFile(path.join(fixture.piBin, "pi.cmd"), "@ECHO off\r\nnode pi-cli.js %*\r\n");
+    await writeFile(path.join(fixture.piBin, "pi.ps1"), "& node pi-cli.js $args\r\n");
+
+    const activation = await activateGlobalLauncher(fixture.environment);
+
+    expect(activation?.launcherPath).toBe(path.join(fixture.piBin, "koni.cmd"));
+  });
+
+  it("still rejects genuinely distinct Windows Pi installations", async () => {
+    const fixture = await piUserPackageFixture("windows-distinct");
+    fixture.environment.platform = "win32";
+    await writeFile(path.join(fixture.piBin, "pi.cmd"), "@ECHO off\r\n");
+    const secondBin = path.join(fixture.root, "windows-second-bin");
+    await mkdir(secondBin);
+    await writeFile(path.join(secondBin, "pi.cmd"), "@ECHO off\r\n");
+    fixture.environment.pathValue = `${fixture.piBin};${secondBin}`;
+
+    await expect(activateGlobalLauncher(fixture.environment)).rejects.toThrow(/ambiguous Pi/u);
   });
 
   it("updates an authenticated launcher and treats same-generation activation as idempotent", async () => {
@@ -206,6 +231,27 @@ describe("Pi-owned global launcher installation", () => {
     expect(JSON.parse(await readFile(fixture.markerPath, "utf8"))).toEqual(first);
   });
 
+  it("does not overwrite a launcher replaced after update authentication", async () => {
+    const fixture = await piUserPackageFixture("update-race-old");
+    const previous = await activateGlobalLauncher(fixture.environment);
+    const next = await addPackageGeneration(fixture, "update-race-next");
+    const launcherPath = previous!.launcherPath;
+    const racedEnvironment = {
+      ...next.environment,
+      [GLOBAL_LAUNCHER_TEST_HOOK]: async (point: GlobalLauncherMutationPoint) => {
+        if (point !== "before_launcher_rename") return;
+        await unlink(launcherPath);
+        await writeFile(launcherPath, "unrelated update race\n", { mode: 0o755 });
+      },
+    };
+
+    await expect(activateGlobalLauncher(racedEnvironment)).rejects.toThrow(
+      /unrelated koni launcher/u,
+    );
+    expect(await readFile(launcherPath, "utf8")).toBe("unrelated update race\n");
+    expect(JSON.parse(await readFile(fixture.markerPath, "utf8"))).toEqual(previous);
+  });
+
   it("removes only the generation that currently owns the launcher", async () => {
     const fixture = await piUserPackageFixture("old-removal");
     await activateGlobalLauncher(fixture.environment);
@@ -219,6 +265,23 @@ describe("Pi-owned global launcher installation", () => {
       code: "ENOENT",
     });
     await expect(readFile(fixture.markerPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("does not unlink a launcher replaced after removal authentication", async () => {
+    const fixture = await piUserPackageFixture("removal-race");
+    const activation = await activateGlobalLauncher(fixture.environment);
+    const racedEnvironment = {
+      ...fixture.environment,
+      [GLOBAL_LAUNCHER_TEST_HOOK]: async (point: GlobalLauncherMutationPoint) => {
+        if (point !== "before_launcher_unlink") return;
+        await unlink(activation!.launcherPath);
+        await writeFile(activation!.launcherPath, "unrelated removal race\n", { mode: 0o755 });
+      },
+    };
+
+    await expect(removeGlobalLauncher(racedEnvironment)).resolves.toBe("not_owner");
+    expect(await readFile(activation!.launcherPath, "utf8")).toBe("unrelated removal race\n");
+    expect(JSON.parse(await readFile(fixture.markerPath, "utf8"))).toEqual(activation);
   });
 
   it("does not follow a replaced marker directory during removal", async () => {
@@ -289,6 +352,36 @@ describe("Pi-owned global launcher installation", () => {
     );
     expect(await readFile(launcherPath, "utf8")).toBe("unrelated after interruption\n");
   });
+
+  it.each(["previous", "next"] as const)(
+    "refuses recovery when the %s journal target physically escapes its package",
+    async (escapedGeneration) => {
+      const fixture = await piUserPackageFixture(`recovery-${escapedGeneration}-escape`);
+      const previous = await activateGlobalLauncher(fixture.environment);
+      const next = await addPackageGeneration(fixture, `recovery-${escapedGeneration}-next`);
+      const interruptedEnvironment = {
+        ...next.environment,
+        [GLOBAL_LAUNCHER_TEST_HOOK]: async (point: GlobalLauncherMutationPoint) => {
+          if (point === "before_launcher_rename") throw new Error("seed pending journal");
+        },
+      };
+      await expect(activateGlobalLauncher(interruptedEnvironment)).rejects.toThrow(
+        "seed pending journal",
+      );
+      const escapedPackageRoot =
+        escapedGeneration === "previous"
+          ? fixture.environment.packageRoot
+          : next.environment.packageRoot;
+      await replacePackageBinWithExternalIdentical(
+        escapedPackageRoot,
+        path.join(fixture.root, `external-${escapedGeneration}-bin`),
+      );
+
+      await expect(removeGlobalLauncher(next.environment)).rejects.toThrow(/escapes its package/u);
+      expect(await readlink(previous!.launcherPath)).toBe(previous!.launcherTarget);
+      expect(JSON.parse(await readFile(fixture.markerPath, "utf8"))).toEqual(previous);
+    },
+  );
 
   it("runs the lifecycle adapter as a no-op outside a Pi user-package install", async () => {
     const root = await temporaryRoot("lifecycle-noop");
@@ -368,6 +461,18 @@ async function temporaryRoot(label: string): Promise<string> {
 async function writeExecutable(destination: string): Promise<void> {
   await writeFile(destination, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   await chmod(destination, 0o755);
+}
+
+async function replacePackageBinWithExternalIdentical(
+  packageRoot: string,
+  externalBin: string,
+): Promise<void> {
+  const packageBin = path.join(packageRoot, "bin");
+  const launcherBytes = await readFile(path.join(packageBin, "koni.js"));
+  await rename(packageBin, path.join(packageRoot, "displaced-bin"));
+  await mkdir(externalBin, { recursive: true });
+  await writeFile(path.join(externalBin, "koni.js"), launcherBytes, { mode: 0o755 });
+  await symlink(externalBin, packageBin, "dir");
 }
 
 async function runLifecycle(
