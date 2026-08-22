@@ -429,8 +429,8 @@ Immediately run:
 pnpm test
 ```
 
-Expected: Turbo reports cache hits for deterministic workspace tests while the two cheap
-untracked-state repository gates execute again.
+Expected: Turbo reports cache hits for deterministic workspace tests while the cheap
+`test:turborepo` untracked-state gate executes again.
 
 - [ ] **Step 5: Run final static gates**
 
