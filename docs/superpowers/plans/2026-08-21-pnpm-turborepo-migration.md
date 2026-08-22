@@ -266,10 +266,10 @@ Retain the existing `check` behavior using pnpm composition.
 Run:
 
 ```sh
-pnpm --filter @koni/core test:file -- test/test-lanes.test.ts
-pnpm --filter @koni/core test:file -- test/setup-pi-inventory.ts \
+pnpm --filter @koni/core test:file test/test-lanes.test.ts
+pnpm --filter @koni/core test:file test/setup-pi-inventory.ts \
   test/profile-package.test.ts test/configuration-loader.test.ts
-pnpm --filter @koni/core test:exclusive -- --reporter=dot
+pnpm --filter @koni/core test:exclusive --reporter=dot
 ```
 
 Expected: classification and isolated-fixture tests pass; every exclusive file passes once in its
@@ -401,7 +401,7 @@ finish with exit code 0.
 Run:
 
 ```sh
-pnpm --filter @koni/core test:parallel -- --reporter=dot
+pnpm --filter @koni/core test:parallel --reporter=dot
 ```
 
 Expected: all parallel-classified tests pass with at most four fork workers. If a test exposes real
@@ -416,8 +416,10 @@ Clear only Koni's local Turbo cache directory if it exists, then run exactly onc
 pnpm test
 ```
 
-Expected: all workspace and repository tests pass. This is the only intentionally cold full-suite
-run in the implementation.
+Expected: all workspace tests and the fast repository tests in the normal developer test graph pass.
+The five-minute package-release rehearsal is intentionally reserved for `pnpm check`, release
+validation, and focused `pnpm test:pi-package` runs. This is the only intentionally cold aggregate
+developer-test run in the implementation.
 
 - [ ] **Step 4: Prove local cache reuse**
 
@@ -427,8 +429,8 @@ Immediately run:
 pnpm test
 ```
 
-Expected: Turbo reports cache hits for deterministic workspace tests; uncached npm/Pi package smoke
-work may still execute.
+Expected: Turbo reports cache hits for deterministic workspace tests while the two cheap
+untracked-state repository gates execute again.
 
 - [ ] **Step 5: Run final static gates**
 

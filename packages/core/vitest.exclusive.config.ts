@@ -5,7 +5,7 @@ import { coreTestDefaults } from "./vitest.config.js";
 export default defineConfig({
   test: {
     ...coreTestDefaults,
-    include: exclusiveTestFiles,
+    include: [...exclusiveTestFiles],
     fileParallelism: false,
     maxWorkers: 1,
   },

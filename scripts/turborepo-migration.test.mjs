@@ -39,12 +39,43 @@ test("root scripts use Turbo instead of npm workspace orchestration", async () =
   }
   for (const name of ["build", "typecheck", "test", "check"])
     assert.match(scripts[name], /turbo run\b/u, `${name} does not use Turbo`);
+  assert.doesNotMatch(
+    scripts.check,
+    /(?:^|\s)check(?:\s|$)/u,
+    "root check must not rerun package-local composed check scripts after their Turbo prerequisites",
+  );
+  for (const task of ["build", "typecheck", "test"])
+    assert.match(
+      scripts.check,
+      new RegExp(`(?:^|\\s)${task}(?:\\s|$)`, "u"),
+      `root check does not schedule ${task}`,
+    );
+  assert.doesNotMatch(
+    scripts.test,
+    /(?:^|\s)test:pi-package(?:\s|$)/u,
+    "developer pnpm test must not include the five-minute release-package rehearsal",
+  );
+  assert.match(
+    scripts.check,
+    /(?:^|\s)test:pi-package(?:\s|$)/u,
+    "repository check must retain the release-package rehearsal",
+  );
 });
 
 test("Turbo uses only the local cache", async () => {
   assert.match(await read(".gitignore"), /^\/\.turbo\/$/mu);
   const turbo = await readJson("turbo.json");
   assert.equal(Object.hasOwn(turbo, "remoteCache"), false);
+  for (const task of ["//#check:brand", "//#test:turborepo"])
+    assert.equal(
+      turbo.tasks?.[task]?.cache,
+      false,
+      `${task} must not cache checks whose result includes untracked filesystem state`,
+    );
+  assert.deepEqual(turbo.tasks?.["//#test:pi-package"]?.dependsOn, [
+    "@koni/core#build",
+    "@koni/core#test",
+  ]);
 });
 
 test("current source workflows use pnpm for repository orchestration", async () => {
@@ -65,6 +96,11 @@ test("current source workflows use pnpm for repository orchestration", async () 
       source,
       /npm run (?:check|build)\b/u,
       `${file} orchestrates the repository with npm`,
+    );
+    assert.doesNotMatch(
+      source,
+      /npm pack[^\n]*--workspace(?:s)?\b/u,
+      `${file} asks npm to resolve removed workspace metadata`,
     );
   }
 });

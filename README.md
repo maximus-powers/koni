@@ -208,8 +208,9 @@ pnpm check
 pnpm build
 ```
 
-`npm pack --workspace @koni/core`, plus the same command for the two profile workspaces, produces
-the exact release artifacts.
+Stock npm still produces the exact release artifacts when it receives each package directory
+explicitly: `npm pack ./packages/core`, `npm pack ./packages/coding-profile`, and
+`npm pack ./packages/research-profile`.
 
 ## License
 

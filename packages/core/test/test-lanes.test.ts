@@ -2,6 +2,8 @@ import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import exclusiveConfig from "../vitest.exclusive.config.js";
+import parallelConfig from "../vitest.parallel.config.js";
 import { exclusiveTestFiles, exclusiveTestReasons } from "./test-lanes.js";
 
 const testDirectory = fileURLToPath(new URL("./", import.meta.url));
@@ -26,5 +28,30 @@ describe("core test lane classification", () => {
         return typeof reason === "string" && reason.trim().length > 0 && reason.length <= 160;
       }),
     ).toBe(true);
+
+    const effectiveParallel = staticTestConfig(parallelConfig);
+    const effectiveExclusive = staticTestConfig(exclusiveConfig);
+    expect(effectiveParallel.fileParallelism).toBe(true);
+    expect(effectiveParallel.maxWorkers).toBe(4);
+    expect(exclusiveTestFiles.every((file) => effectiveParallel.exclude?.includes(file))).toBe(
+      true,
+    );
+    expect(effectiveExclusive.fileParallelism).toBe(false);
+    expect(effectiveExclusive.maxWorkers).toBe(1);
+    expect(effectiveExclusive.include).toEqual([...exclusiveTestFiles]);
   });
 });
+
+function staticTestConfig(config: unknown) {
+  expect(config).toBeTypeOf("object");
+  const testConfig = (config as { test?: StaticTestConfig }).test;
+  expect(testConfig).toBeTypeOf("object");
+  return testConfig ?? {};
+}
+
+interface StaticTestConfig {
+  exclude?: string[];
+  fileParallelism?: boolean;
+  include?: string[];
+  maxWorkers?: number;
+}

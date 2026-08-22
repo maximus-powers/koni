@@ -60,8 +60,10 @@ Deterministic tasks are cached locally:
 
 Repository-level tests remain named root scripts and are modeled as explicit root Turbo tasks where
 that improves dependency ordering. Tasks that create disposable installations, exercise package
-manager behavior, or validate mutable external state are not cached. The Pi package smoke task
-depends on the Core build.
+manager behavior, or validate mutable external state are not cached. The five-minute Pi package
+smoke stays in `pnpm check` and release validation instead of the normal developer `pnpm test`; it
+depends on both the Core build and Core test so its authority and package-manager rehearsal cannot
+contend with the exclusive Core lane.
 
 `.turbo/` is ignored. No remote-cache URL, token, team, or CI cache transport is configured.
 

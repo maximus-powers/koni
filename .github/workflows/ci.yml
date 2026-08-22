@@ -37,9 +37,9 @@ jobs:
       - name: Verify the three public package payloads
         if: runner.os == 'Linux'
         run: |
-          npm pack --dry-run --json --workspace @koni/core > /tmp/koni-core-pack.json
-          npm pack --dry-run --json --workspace @koni/coding-profile > /tmp/koni-coding-pack.json
-          npm pack --dry-run --json --workspace @koni/research-profile > /tmp/koni-research-pack.json
+          npm pack --dry-run --json ./packages/core > /tmp/koni-core-pack.json
+          npm pack --dry-run --json ./packages/coding-profile > /tmp/koni-coding-pack.json
+          npm pack --dry-run --json ./packages/research-profile > /tmp/koni-research-pack.json
           node - <<'NODE'
           const expected = new Map([
             ["/tmp/koni-core-pack.json", "@koni/core"],

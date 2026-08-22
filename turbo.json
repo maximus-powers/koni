@@ -18,16 +18,20 @@
       "dependsOn": ["typecheck", "test", "build"],
       "outputs": []
     },
-    "//#check:brand": {},
+    "//#check:brand": {
+      "cache": false
+    },
     "//#test:architecture": {},
     "//#test:docs": {},
     "//#test:pi-host-boundary": {},
     "//#test:pi-package": {
-      "dependsOn": ["@koni/core#build"],
+      "dependsOn": ["@koni/core#build", "@koni/core#test"],
       "cache": false
     },
     "//#test:profiles": {},
     "//#test:repository-gates": {},
-    "//#test:turborepo": {}
+    "//#test:turborepo": {
+      "cache": false
+    }
   }
 }

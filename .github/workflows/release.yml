@@ -63,9 +63,9 @@ jobs:
       - name: Pack the coarse Pi package system
         run: |
           mkdir -p release
-          npm pack --workspace @koni/coding-profile --pack-destination release
-          npm pack --workspace @koni/research-profile --pack-destination release
-          npm pack --workspace @koni/core --pack-destination release
+          npm pack ./packages/coding-profile --pack-destination release
+          npm pack ./packages/research-profile --pack-destination release
+          npm pack ./packages/core --pack-destination release
           cp LICENSE release/Koni-LICENSE
           test "$(find release -maxdepth 1 -name '*.tgz' | wc -l)" -eq 3
       - name: Smoke the exact archives through disposable stock Pi
