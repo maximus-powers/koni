@@ -14,8 +14,13 @@ koni tui --root .
 ```
 
 The extension is inert until a Koni command. Loading it does not authenticate, inspect credentials,
-start an authority, mutate Pi settings or resources, or stop Pi. Inert means no passive authority
-start, recovery, provider request, model load, or durable effect.
+start an authority, mutate Pi settings or resources, or stop Pi. Globally installed packages remain
+passive outside initialized repositories. Inert means no passive authority start, recovery, provider
+request, model load, or durable effect.
+
+`/koni init` immediately installs and validates Coding by default, then enters guided Configure.
+Configure waits for explicit approval before applying proposed project-specific edits. The
+initialization and handoff create no run, authority run state, or provider attempt.
 
 In a trusted initialized project, Pi TUI sessions attach a bounded read-only background-run widget
 even when the authority is stopped and there are no runs. With runs present, the widget gives each
@@ -447,7 +452,8 @@ The shipping command surface is `init`, `update`, `conflicts`, `start`, `stop`, 
 ### Project setup
 
 ```sh
-koni init coding --root .          # or: koni init research --root .
+koni init                           # Coding (default)
+koni init research --root .          # optional Research profile
 koni init coding --profile-package /path/to/reviewed-package
 koni config validate --root .
 koni update --root .

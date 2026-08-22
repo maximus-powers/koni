@@ -28,6 +28,7 @@ import {
   resolveProfilePackageRoot,
   type KoniProfileSourceDescriptor,
 } from "./operator/profile-source.js";
+import { initializeProjectProfile } from "./operator/project-initialization.js";
 import {
   connectRunningKoniAuthority,
   createKoniInteractiveProposalTools,
@@ -84,6 +85,8 @@ export interface KoniExtensionDependencies {
 const KONI_CORE_DISCOVER_EVENT = "koni.core.discover.v1";
 const KONI_CORE_AVAILABLE_EVENT = "koni.core.available.v1";
 const KONI_CORE_INSTANCE_PROTOCOL = "koni.core-instance.v1";
+const CONFIGURE_HANDOFF =
+  "Use $configure-koni to inspect this initialized repository, propose the smallest evidence-backed project configuration, wait for my approval before editing, and validate the complete configuration after applying approved changes. Do not create a run.";
 
 interface KoniCoreInstanceDescriptor {
   protocol: typeof KONI_CORE_INSTANCE_PROTOCOL;
@@ -313,7 +316,7 @@ export function createKoniCoreExtension(
       if (runtime === undefined) {
         context.ui.notify(
           projectTrusted(context)
-            ? "Koni is not initialized here. Run `/koni init coding` or `/koni init research`."
+            ? "Koni is not initialized in this repository. Run `koni init` or `/koni init`, then retry."
             : "Trust this project in Pi before opening Koni runs.",
           "info",
         );
@@ -378,10 +381,10 @@ export function createKoniCoreExtension(
             openFullControlCenter,
             openGuidedRun,
             openRuns,
+            sendUserMessage: (content, options) => pi.sendUserMessage(content, options),
           });
           const command = splitArguments(argumentsText)[0]?.toLowerCase();
           if (
-            command === "init" ||
             command === "update" ||
             command === "start" ||
             command === "restart" ||
@@ -562,6 +565,7 @@ async function handleKoniCommand(input: {
   openFullControlCenter(context: ExtensionCommandContext): Promise<void>;
   openGuidedRun(context: ExtensionCommandContext, requestedRunType?: string): Promise<void>;
   openRuns(context: ExtensionContext): Promise<void>;
+  sendUserMessage: ExtensionAPI["sendUserMessage"];
 }): Promise<void> {
   const arguments_ = splitArguments(input.argumentsText);
   const command = arguments_.shift()?.toLowerCase() ?? "dashboard";
@@ -646,17 +650,31 @@ async function handleKoniCommand(input: {
     }
     case "init": {
       const sources = input.profiles.discover();
-      const selector = arguments_[0] ?? (await selectInitialProfile(input.context, sources));
-      if (selector === undefined) return;
+      const selector = arguments_[0] ?? "coding";
       const packageRoot = await input.dependencies.resolveProfile(selector, sources);
-      const result = await input.dependencies.install({
-        projectRoot: input.context.cwd,
-        packageRoot,
-      });
+      const { installation, validation } = await initializeProjectProfile(
+        {
+          projectRoot: input.context.cwd,
+          profilePackageRoot: packageRoot,
+        },
+        {
+          install: ({ projectRoot, profilePackageRoot }) =>
+            input.dependencies.install({ projectRoot, packageRoot: profilePackageRoot }),
+          validate: input.dependencies.validate,
+        },
+      );
       input.context.ui.notify(
-        `Installed ${result.packageName}@${result.profileVersion} (${result.added.length} files).`,
+        `Initialized ${installation.packageName}@${installation.profileVersion} with validated configuration ${validation.configuration.sha256}.`,
         "info",
       );
+      try {
+        input.sendUserMessage(CONFIGURE_HANDOFF, { deliverAs: "followUp" });
+      } catch (error) {
+        input.context.ui.notify(
+          `Koni is initialized and validated, but the Configure handoff failed: ${operatorError(error)}. Ask Pi to use $configure-koni; initialization does not need to be repeated.`,
+          "error",
+        );
+      }
       return;
     }
     case "conflicts": {
@@ -811,18 +829,6 @@ function requireConflictAuthorityClient(client: {
     revision: client.revision,
     request: client.request.bind(client),
   };
-}
-
-async function selectInitialProfile(
-  context: ExtensionCommandContext,
-  sources: readonly KoniProfileSourceDescriptor[],
-): Promise<string | undefined> {
-  if (sources.length === 0) return "coding";
-  if (sources.length === 1) return sources[0]!.package;
-  return context.ui.select(
-    "Project profile",
-    sources.map((source) => source.package),
-  );
 }
 
 function commandCompletions(

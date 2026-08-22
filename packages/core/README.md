@@ -44,9 +44,16 @@ one current source remains. Ordinary Pi commands and chat continue to work.
 The same control center is available explicitly from a shell:
 
 ```sh
-koni init coding
+koni init
 koni tui
 ```
+
+After `pi install npm:@koni/core` and `pi install npm:@koni/coding-profile`, bare `koni init`
+initializes Coding in the current Git project. Install `npm:@koni/research-profile` only when you
+need Research, then use explicit `koni init research`. Globally installed packages are passive
+outside initialized repositories: they create no project, run, authority, or provider attempt.
+Inside Pi, `/koni init` immediately installs and validates Coding by default, then enters guided
+Configure. Approval gates only Configure's later project-specific edits; no run is created.
 
 Useful noninteractive commands are `koni status`, `koni config validate`, `koni update`, and
 `koni run --goal "…" --type small --target main`. `koni tui` renders only in the terminal where it

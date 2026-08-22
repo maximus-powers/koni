@@ -16,7 +16,7 @@ import { CONTROL_CATALOG_PROTOCOL } from "../src/control-center/protocol.js";
 import { monitorModelsFixture, monitorRunTypesFixture } from "./fixtures/monitor-fixtures.js";
 
 describe("guided /koni-run intake", () => {
-  it("explains exact initialization commands and stops without connecting", async () => {
+  it("explains bare initialization first and stops without connecting", async () => {
     const connect = vi.fn(async () => new FakeIntakeConnection());
     const result = await prepareGuidedRunIntake({
       trusted: true,
@@ -28,7 +28,7 @@ describe("guided /koni-run intake", () => {
       kind: "blocked",
       reason: "uninitialized",
       message:
-        "Koni is not initialized in this repository. Run `/koni init coding` or `/koni init research`, then retry `/koni-run`.",
+        "Koni is not initialized in this repository. Run `koni init` or `/koni init`, then retry.",
     });
     expect(connect).not.toHaveBeenCalled();
   });

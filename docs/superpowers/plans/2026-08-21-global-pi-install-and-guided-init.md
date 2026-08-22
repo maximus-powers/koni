@@ -43,8 +43,8 @@ Node's test runner, packed-tarball smoke tests.
 
 - `packages/core/src/installation/global-launcher.ts`: package-owned launcher discovery, ownership
   marker validation, atomic activation, recovery, and removal.
-- `packages/core/bin/koni-package-lifecycle.js`: minimal npm lifecycle adapter that invokes built
-  launcher code only for a real Pi user-package installation.
+- `packages/core/bin/koni-package-lifecycle.js`: minimal package adapter that activates only for a
+  real Pi user-package installation and retains an explicit authenticated remove action.
 - `packages/core/src/operator/project-initialization.ts`: shared profile install plus authoritative
   configuration-validation operation.
 - `packages/core/src/cli.ts`: bare-init defaults, shared initialization call, validated result
@@ -92,6 +92,7 @@ export interface GlobalLauncherActivation {
   packageRoot: string;
   launcherTarget: string;
   targetSha256: string;
+  launcherSha256: string;
 }
 
 export function isPiUserPackageInstallation(input: {
@@ -120,7 +121,7 @@ PATH and a real Core `bin/koni.js` target. Assert:
 expect(isPiUserPackageInstallation({ packageRoot, agentDir })).toBe(true);
 const activation = await activateGlobalLauncher(environment);
 expect(activation?.launcherPath).toBe(path.join(piBin, "koni"));
-expect(await realpath(activation!.launcherPath)).toBe(await realpath(coreLauncher));
+expect((await lstat(activation!.launcherPath)).isFile()).toBe(true);
 expect(JSON.parse(await readFile(markerPath, "utf8"))).toMatchObject({
   protocol: "koni.global-launcher.v1",
   launcherPath: path.join(piBin, "koni"),
@@ -149,9 +150,9 @@ for one resolved `pi`, a platform launcher path beside that executable, SHA-256 
 adjacent-temp atomic publication. Refuse ambiguous Pi candidates, unwritable directories, symlink
 escapes, malformed markers, and unrelated launcher targets.
 
-The POSIX launcher must resolve the package target without copying package bytes. The Windows form
-must use an exact command shim bound by the same marker. Do not export this module from
-`packages/core/src/index.ts`.
+The POSIX launcher must be a small authenticated executable that resolves the package target without
+copying package bytes. The Windows form must contain the same self-cleaning bootstrap in an exact
+command shim bound by the same marker. Do not export this module from `packages/core/src/index.ts`.
 
 - [ ] **Step 4: Add RED tests for update, removal, collision, and interruption**
 
@@ -183,20 +184,22 @@ bounded authenticated marker/journal; a bare filename never proves ownership.
 
 - [ ] **Step 7: Add the npm lifecycle adapter and package scripts**
 
-Add to `packages/core/package.json`:
+Add the installation hook to `packages/core/package.json`:
 
 ```json
 {
   "scripts": {
-    "postinstall": "node ./bin/koni-package-lifecycle.js activate",
-    "preuninstall": "node ./bin/koni-package-lifecycle.js remove"
+    "postinstall": "node ./bin/koni-package-lifecycle.js activate"
   }
 }
 ```
 
 The adapter derives `packageRoot` from its own location, `agentDir` from `PI_CODING_AGENT_DIR` or
 `~/.pi/agent`, and passes the inherited PATH/platform. It exits without writes when
-`isPiUserPackageInstallation` is false. A real Pi install failure must be nonzero and actionable.
+`isPiUserPackageInstallation` is false. A real Pi install failure must be nonzero and actionable. Pi
+0.80.10 removal delegates to npm 11, which invokes no uninstall hook; the public launcher must
+therefore remain runnable long enough to authenticate and remove its stale public path on first
+post-removal invocation.
 
 - [ ] **Step 8: Verify Task 1 GREEN**
 

@@ -32,6 +32,7 @@ import {
   readInstalledProfileReference,
   resolveProfilePackageRoot,
 } from "./operator/profile-source.js";
+import { initializeProjectProfile } from "./operator/project-initialization.js";
 import { isSha256Digest, type Sha256Digest } from "./shared/canonical.js";
 
 export interface KoniCliIO {
@@ -49,6 +50,7 @@ export interface KoniCliDependencies {
   validate: typeof validateProjectConfiguration;
   resolveAgent: typeof resolveProjectAgentConfiguration;
   install: typeof installAndCacheProfile;
+  initialize: typeof initializeProjectProfile;
   previewInstall: typeof previewProfileUpdate;
   resolveProfile: typeof resolveProfilePackageRoot;
   readInstalled: typeof readInstalledProfileReference;
@@ -77,6 +79,7 @@ const DEFAULT_DEPENDENCIES: KoniCliDependencies = {
   validate: validateProjectConfiguration,
   resolveAgent: resolveProjectAgentConfiguration,
   install: installAndCacheProfile,
+  initialize: initializeProjectProfile,
   previewInstall: previewProfileUpdate,
   resolveProfile: resolveProfilePackageRoot,
   readInstalled: readInstalledProfileReference,
@@ -110,14 +113,19 @@ export async function runKoniCli(
       const endpoint = await discoverAuthorityEndpoint(projectRoot);
       const selector = parsed.profilePackage ?? parsed.positionals[0] ?? "coding";
       const packageRoot = await dependencies.resolveProfile(selector);
-      const result = await dependencies.install({
-        projectRoot: endpoint.identity.worktreeRoot,
-        profilePackageRoot: packageRoot,
-      });
-      print(io, parsed.json, result, [
+      const initialized = await dependencies.initialize(
+        {
+          projectRoot: endpoint.identity.worktreeRoot,
+          profilePackageRoot: packageRoot,
+        },
+        { install: dependencies.install, validate: dependencies.validate },
+      );
+      const { installation: result, validation } = initialized;
+      print(io, parsed.json, initialized, [
         `Installed ${result.packageName}@${result.profileVersion}`,
         `Project: ${result.projectConfigRoot}`,
         `Added ${result.added.length}, updated ${result.updated.length}, preserved ${result.preserved.length}`,
+        `Validated configuration ${validation.configuration.sha256}`,
         ...(result.pendingUpstream.length === 0
           ? []
           : [`${result.pendingUpstream.length} upstream change(s) staged for review`]),
@@ -775,6 +783,7 @@ function helpText(): string {
     `Koni ${KONI_CORE_API_VERSION}\n\n` +
     "Usage:\n" +
     "  koni init [coding|research] [--profile-package PATH] [--root PATH]\n" +
+    "    Defaults: coding profile, current directory; validates before success.\n" +
     "  koni update [--profile-package PATH] [--root PATH] [--preview SHA256 --apply]\n" +
     "  koni conflicts [PATH] [--keep-project|--accept-upstream] [--root PATH]\n" +
     "  koni start [--root PATH]\n" +
