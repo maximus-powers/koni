@@ -1,5 +1,5 @@
 packages:
   - packages/*
 allowBuilds:
-  '@google/genai': false
+  "@google/genai": false
   protobufjs: false

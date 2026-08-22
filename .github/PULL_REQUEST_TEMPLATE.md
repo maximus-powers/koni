@@ -12,7 +12,7 @@
 
 ## Validation
 
-- [ ] `npm run check`
+- [ ] `pnpm check`
 - [ ] Exact package smoke ran when shipping, installation, or session behavior changed
 - [ ] Affected profile manifests were regenerated and verified
 

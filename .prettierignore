@@ -9,8 +9,11 @@ packages/*-profile/koni/**
 packages/core/test/fixtures/profile-prior-releases/**
 
 # Generated dependency state and binary/archive payloads.
+.superpowers/**
 package-lock.json
 **/package-lock.json
+pnpm-lock.yaml
+scripts/fixtures/pi-host-package-lock.json
 *.lock
 *.min.*
 *.snap

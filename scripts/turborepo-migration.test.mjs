@@ -51,6 +51,7 @@ test("current source workflows use pnpm for repository orchestration", async () 
   const operationalFiles = [
     ".github/workflows/ci.yml",
     ".github/workflows/release.yml",
+    ".github/PULL_REQUEST_TEMPLATE.md",
     "scripts/install-dev.sh",
     "CONTRIBUTING.md",
     "README.md",
