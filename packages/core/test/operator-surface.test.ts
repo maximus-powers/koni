@@ -30,6 +30,7 @@ import {
   loadCachedInstalledProfile,
   PiProfileSourceCatalog,
 } from "../src/operator/profile-source.js";
+import { initializeProjectProfile } from "../src/operator/project-initialization.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const temporaryRoots: string[] = [];
@@ -457,6 +458,183 @@ describe("Pi operator extension", () => {
 });
 
 describe("shell operator surface", () => {
+  it("initializes the coding profile in the current Git worktree and validates it before success", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "koni-cli-init-default-"));
+    temporaryRoots.push(root);
+    const nested = path.join(root, "nested", "working-directory");
+    await mkdir(nested, { recursive: true });
+    await execFileAsync("git", ["init", "-q"], { cwd: root });
+    const canonicalRoot = await realpath(root);
+    const codingPackageRoot = "/authenticated/coding-profile";
+    const output: string[] = [];
+    const io: KoniCliIO = {
+      stdout: (text) => output.push(text),
+      stderr: () => undefined,
+      stdinIsTTY: false,
+      stdoutIsTTY: false,
+    };
+    const dependencies = fakeCliDependencies();
+    vi.mocked(dependencies.resolveProfile).mockResolvedValue(codingPackageRoot);
+    vi.mocked(dependencies.install).mockResolvedValue({
+      projectConfigRoot: canonicalRoot,
+      packageName: "@koni/coding-profile",
+      profileVersion: "1.2.3",
+      added: ["agents/lead.yaml"],
+      updated: ["koni.yaml"],
+      preserved: ["README.md"],
+      pendingUpstream: [],
+    } as never);
+    vi.mocked(dependencies.validate).mockResolvedValue({
+      ok: true,
+      projectRoot: canonicalRoot,
+      profile: {
+        packageName: "@koni/coding-profile",
+        profileId: "coding",
+        profileVersion: "1.2.3",
+        bundleSha256: `sha256:${"a".repeat(64)}`,
+      },
+      diagnostics: [],
+      configuration: {
+        sha256: `sha256:${"b".repeat(64)}`,
+        effectiveBundleSha256: `sha256:${"c".repeat(64)}`,
+        runTypes: ["small"],
+        agents: ["lead"],
+      },
+    });
+
+    const previousCwd = process.cwd();
+    process.chdir(nested);
+    try {
+      expect(await runKoniCli(["init"], io, dependencies)).toBe(0);
+    } finally {
+      process.chdir(previousCwd);
+    }
+
+    expect(dependencies.resolveProfile).toHaveBeenCalledWith("coding");
+    expect(dependencies.install).toHaveBeenCalledWith({
+      projectRoot: canonicalRoot,
+      profilePackageRoot: codingPackageRoot,
+    });
+    expect(dependencies.validate).toHaveBeenCalledWith(canonicalRoot);
+    expect(output.join("")).toContain(`Validated configuration sha256:${"b".repeat(64)}`);
+    expect(dependencies.run).not.toHaveBeenCalled();
+    expect(dependencies.ensure).not.toHaveBeenCalled();
+  });
+
+  it("initializes explicit profile selectors and roots through the same validated operation", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "koni-cli-init-explicit-"));
+    temporaryRoots.push(root);
+    await execFileAsync("git", ["init", "-q"], { cwd: root });
+    const canonicalRoot = await realpath(root);
+    const io: KoniCliIO = {
+      stdout: () => undefined,
+      stderr: () => undefined,
+      stdinIsTTY: false,
+      stdoutIsTTY: false,
+    };
+    const dependencies = fakeCliDependencies();
+    vi.mocked(dependencies.resolveProfile).mockImplementation(async (selector) =>
+      selector === "/custom/profile" ? selector : `/profiles/${selector}`,
+    );
+    vi.mocked(dependencies.install).mockResolvedValue({
+      projectConfigRoot: canonicalRoot,
+      packageName: "@koni/research-profile",
+      profileVersion: "1.2.3",
+      added: [],
+      updated: [],
+      preserved: [],
+      pendingUpstream: [],
+    } as never);
+    vi.mocked(dependencies.validate).mockResolvedValue({
+      ok: true,
+      projectRoot: canonicalRoot,
+      profile: {
+        packageName: "@koni/research-profile",
+        profileId: "research",
+        profileVersion: "1.2.3",
+        bundleSha256: `sha256:${"a".repeat(64)}`,
+      },
+      diagnostics: [],
+      configuration: {
+        sha256: `sha256:${"b".repeat(64)}`,
+        effectiveBundleSha256: `sha256:${"c".repeat(64)}`,
+        runTypes: ["research"],
+        agents: ["lead"],
+      },
+    });
+
+    expect(await runKoniCli(["init", "research", "--root", root], io, dependencies)).toBe(0);
+    expect(dependencies.resolveProfile).toHaveBeenLastCalledWith("research");
+    expect(dependencies.install).toHaveBeenLastCalledWith({
+      projectRoot: canonicalRoot,
+      profilePackageRoot: "/profiles/research",
+    });
+
+    expect(
+      await runKoniCli(
+        ["init", "--profile-package", "/custom/profile", "--root", root],
+        io,
+        dependencies,
+      ),
+    ).toBe(0);
+    expect(dependencies.resolveProfile).toHaveBeenLastCalledWith("/custom/profile");
+    expect(dependencies.install).toHaveBeenLastCalledWith({
+      projectRoot: canonicalRoot,
+      profilePackageRoot: "/custom/profile",
+    });
+  });
+
+  it("rejects invalid initialized configuration without printing success or starting Koni", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "koni-cli-init-invalid-"));
+    temporaryRoots.push(root);
+    await execFileAsync("git", ["init", "-q"], { cwd: root });
+    const canonicalRoot = await realpath(root);
+    const output: string[] = [];
+    const io: KoniCliIO = {
+      stdout: (text) => output.push(text),
+      stderr: () => undefined,
+      stdinIsTTY: false,
+      stdoutIsTTY: false,
+    };
+    const dependencies = fakeCliDependencies();
+    vi.mocked(dependencies.resolveProfile).mockResolvedValue("/authenticated/coding-profile");
+    vi.mocked(dependencies.install).mockResolvedValue({
+      projectConfigRoot: canonicalRoot,
+      packageName: "@koni/coding-profile",
+      profileVersion: "1.2.3",
+      added: [],
+      updated: [],
+      preserved: [],
+      pendingUpstream: [],
+    } as never);
+    vi.mocked(dependencies.validate).mockResolvedValue({
+      ok: true,
+      projectRoot: canonicalRoot,
+      profile: {
+        packageName: "@koni/coding-profile",
+        profileId: "coding",
+        profileVersion: "1.2.3",
+        bundleSha256: `sha256:${"a".repeat(64)}`,
+      },
+      diagnostics: [
+        {
+          code: "missing_agent",
+          severity: "error",
+          path: "/agents/lead",
+          message: "agent missing",
+        },
+      ],
+    });
+
+    await expect(runKoniCli(["init", "--root", root], io, dependencies)).rejects.toMatchObject({
+      code: "configuration_invalid",
+      diagnostics: [{ path: "/agents/lead", message: "agent missing" }],
+    });
+    expect(output.join("")).not.toContain("Installed");
+    expect(dependencies.run).not.toHaveBeenCalled();
+    expect(dependencies.ensure).not.toHaveBeenCalled();
+  });
+
   it("allows explicit audit steering for an already-approved proposal", () => {
     const approved = {
       id: "TK-change-approved",
@@ -535,6 +713,10 @@ describe("shell operator surface", () => {
     expect(output.pop()).toBe("1.0.0\n");
     expect(await runKoniCli(["--help"], io, dependencies)).toBe(0);
     const help = output.pop()!;
+    expect(help).toContain("koni init [coding|research] [--profile-package PATH] [--root PATH]");
+    expect(help).toContain(
+      "Defaults: coding profile, current directory; validates before success.",
+    );
     expect(help).toContain("koni run --goal TEXT [--field ID=VALUE]... [--type <run-type>]");
     expect(help).toContain(
       "Available run types come from the project's compiled profile and configuration.",
@@ -1322,6 +1504,7 @@ function fakeCliDependencies(): KoniCliDependencies {
     install: vi.fn(),
     previewInstall: vi.fn(),
     resolveProfile: vi.fn(),
+    initialize: initializeProjectProfile,
     readInstalled: vi.fn(),
     run: vi.fn(),
     resumeRun: vi.fn(),
