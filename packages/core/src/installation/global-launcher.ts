@@ -26,6 +26,9 @@ export type GlobalLauncherMutationPoint =
   | "before_launcher_rename"
   | "after_launcher_rename"
   | "before_launcher_unlink"
+  | "after_launcher_displaced_validation"
+  | "after_launcher_removal_validation"
+  | "after_recovery_target_containment"
   | "before_marker_rename"
   | "after_marker_rename";
 
@@ -163,7 +166,7 @@ export async function removeGlobalLauncher(
   if (launcherExists && !(await launcherMatches(marker, environment.platform))) return "not_owner";
   if (launcherExists) {
     await callMutationHook(environment, "before_launcher_unlink");
-    if (!(await removeLauncherIfOwned(marker, environment.platform))) return "not_owner";
+    if (!(await removeLauncherIfOwned(marker, environment))) return "not_owner";
   }
   await unlink(markerPath);
   await syncDirectory(path.dirname(launcherPath));
@@ -182,14 +185,21 @@ async function recoverPendingActivation(
   if (journal === "malformed") {
     throw new Error(`refusing malformed global launcher journal at ${journalPath}`);
   }
-  if (journal.previous !== null) {
-    await assertRegularTargetWithinPackage(
+  if (
+    journal.previous !== null &&
+    (await digestTargetWithinPackage(
       journal.previous.launcherTarget,
       journal.previous.packageRoot,
-    );
+    )) !== journal.previous.targetSha256
+  ) {
+    throw new Error("refusing global launcher recovery because its previous target changed");
   }
-  await assertRegularTargetWithinPackage(journal.next.launcherTarget, journal.next.packageRoot);
-  if (!(await targetMatchesDigest(journal.next))) {
+  const nextDigest = await digestTargetWithinPackage(
+    journal.next.launcherTarget,
+    journal.next.packageRoot,
+    environment,
+  );
+  if (nextDigest !== journal.next.targetSha256) {
     throw new Error("refusing global launcher recovery because its intended target changed");
   }
   const marker = await readOwnershipMarker(markerPath, environment, launcherPath);
@@ -228,15 +238,12 @@ async function activationFor(
 ): Promise<GlobalLauncherActivation> {
   const packageRoot = path.resolve(environment.packageRoot);
   const launcherTarget = path.join(packageRoot, "bin", "koni.js");
-  await assertRegularTargetWithinPackage(launcherTarget, packageRoot);
   return {
     protocol: ACTIVATION_PROTOCOL,
     launcherPath,
     packageRoot,
     launcherTarget,
-    targetSha256: createHash("sha256")
-      .update(await readFile(launcherTarget))
-      .digest("hex"),
+    targetSha256: await digestTargetWithinPackage(launcherTarget, packageRoot),
   };
 }
 
@@ -266,17 +273,43 @@ async function findSolePiExecutable(environment: GlobalLauncherEnvironment): Pro
   return [...matches.values()][0]!;
 }
 
-async function assertRegularTargetWithinPackage(
+async function digestTargetWithinPackage(
   target: string,
   packageRoot: string,
+  hookEnvironment?: GlobalLauncherEnvironment,
+): Promise<string> {
+  const handle = await open(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile()) {
+      throw new Error(`the Koni launcher target is not a regular file: ${target}`);
+    }
+    await assertOpenedTargetIdentity(target, packageRoot, opened.dev, opened.ino);
+    if (hookEnvironment !== undefined) {
+      await callMutationHook(hookEnvironment, "after_recovery_target_containment");
+    }
+    const bytes = await handle.readFile();
+    await assertOpenedTargetIdentity(target, packageRoot, opened.dev, opened.ino);
+    return createHash("sha256").update(bytes).digest("hex");
+  } finally {
+    await handle.close();
+  }
+}
+
+async function assertOpenedTargetIdentity(
+  target: string,
+  packageRoot: string,
+  openedDevice: number,
+  openedInode: number,
 ): Promise<void> {
-  const metadata = await lstat(target);
-  if (!metadata.isFile())
-    throw new Error(`the Koni launcher target is not a regular file: ${target}`);
   const physicalRoot = await realpath(packageRoot);
   const physicalTarget = await realpath(target);
   if (path.dirname(physicalTarget) !== path.join(physicalRoot, "bin")) {
     throw new Error(`the Koni launcher target escapes its package: ${target}`);
+  }
+  const current = await stat(physicalTarget);
+  if (current.dev !== openedDevice || current.ino !== openedInode) {
+    throw new Error(`the Koni launcher target changed during authentication: ${target}`);
   }
 }
 
@@ -412,11 +445,10 @@ async function launcherMatches(
 
 async function targetMatchesDigest(activation: GlobalLauncherActivation): Promise<boolean> {
   try {
-    const metadata = await lstat(activation.launcherTarget);
-    if (!metadata.isFile()) return false;
-    const digest = createHash("sha256")
-      .update(await readFile(activation.launcherTarget))
-      .digest("hex");
+    const digest = await digestTargetWithinPackage(
+      activation.launcherTarget,
+      activation.packageRoot,
+    );
     return digest === activation.targetSha256;
   } catch {
     return false;
@@ -515,6 +547,7 @@ async function publishLauncherConditionally(
         displaced = undefined;
         throw unrelatedLauncherError(activation.launcherPath);
       }
+      await callMutationHook(environment, "after_launcher_displaced_validation");
     }
     try {
       await publishNoReplace(temporary, activation.launcherPath);
@@ -527,7 +560,6 @@ async function publishLauncherConditionally(
       throw error;
     }
     if (displaced !== undefined) {
-      await unlink(displaced);
       displaced = undefined;
     }
     if (invokeHooks) await callMutationHook(environment, "after_launcher_rename");
@@ -539,7 +571,7 @@ async function publishLauncherConditionally(
 
 async function removeLauncherIfOwned(
   activation: GlobalLauncherActivation,
-  platform: NodeJS.Platform,
+  environment: GlobalLauncherEnvironment,
 ): Promise<boolean> {
   const displaced = adjacentTemporary(activation.launcherPath);
   try {
@@ -547,11 +579,11 @@ async function removeLauncherIfOwned(
   } catch {
     return false;
   }
-  if (!(await launcherMatches(atPath(activation, displaced), platform))) {
+  if (!(await launcherMatches(atPath(activation, displaced), environment.platform))) {
     await restoreNoReplace(displaced, activation.launcherPath);
     return false;
   }
-  await unlink(displaced);
+  await callMutationHook(environment, "after_launcher_removal_validation");
   return true;
 }
 
@@ -567,7 +599,12 @@ async function publishNoReplace(source: string, destination: string): Promise<vo
 
 async function restoreNoReplace(source: string, destination: string): Promise<void> {
   try {
-    await publishNoReplace(source, destination);
+    const metadata = await lstat(source);
+    if (metadata.isSymbolicLink()) {
+      await symlink(await readlink(source), destination, "file");
+    } else {
+      await link(source, destination);
+    }
   } catch (error) {
     if (!isCode(error, "EEXIST")) throw error;
   }

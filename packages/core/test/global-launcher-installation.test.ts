@@ -4,6 +4,7 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  readdir,
   readlink,
   realpath,
   rename,
@@ -252,6 +253,28 @@ describe("Pi-owned global launcher installation", () => {
     expect(JSON.parse(await readFile(fixture.markerPath, "utf8"))).toEqual(previous);
   });
 
+  it("never deletes a quarantine replaced after update validation", async () => {
+    const fixture = await piUserPackageFixture("update-quarantine-race");
+    const previous = await activateGlobalLauncher(fixture.environment);
+    const next = await addPackageGeneration(fixture, "update-quarantine-next");
+    let quarantinePath: string | undefined;
+    const racedEnvironment = {
+      ...next.environment,
+      [GLOBAL_LAUNCHER_TEST_HOOK]: async (point: GlobalLauncherMutationPoint) => {
+        if (point !== "after_launcher_displaced_validation") return;
+        quarantinePath = await replaceQuarantineWithUnrelated(
+          fixture.piBin,
+          previous!.launcherTarget,
+          "unrelated update quarantine\n",
+        );
+      },
+    };
+
+    await expect(activateGlobalLauncher(racedEnvironment)).resolves.toBeDefined();
+    expect(quarantinePath).toBeDefined();
+    expect(await readFile(quarantinePath!, "utf8")).toBe("unrelated update quarantine\n");
+  });
+
   it("removes only the generation that currently owns the launcher", async () => {
     const fixture = await piUserPackageFixture("old-removal");
     await activateGlobalLauncher(fixture.environment);
@@ -282,6 +305,27 @@ describe("Pi-owned global launcher installation", () => {
     await expect(removeGlobalLauncher(racedEnvironment)).resolves.toBe("not_owner");
     expect(await readFile(activation!.launcherPath, "utf8")).toBe("unrelated removal race\n");
     expect(JSON.parse(await readFile(fixture.markerPath, "utf8"))).toEqual(activation);
+  });
+
+  it("never deletes a quarantine replaced after removal validation", async () => {
+    const fixture = await piUserPackageFixture("removal-quarantine-race");
+    const activation = await activateGlobalLauncher(fixture.environment);
+    let quarantinePath: string | undefined;
+    const racedEnvironment = {
+      ...fixture.environment,
+      [GLOBAL_LAUNCHER_TEST_HOOK]: async (point: GlobalLauncherMutationPoint) => {
+        if (point !== "after_launcher_removal_validation") return;
+        quarantinePath = await replaceQuarantineWithUnrelated(
+          fixture.piBin,
+          activation!.launcherTarget,
+          "unrelated removal quarantine\n",
+        );
+      },
+    };
+
+    await expect(removeGlobalLauncher(racedEnvironment)).resolves.toBe("removed");
+    expect(quarantinePath).toBeDefined();
+    expect(await readFile(quarantinePath!, "utf8")).toBe("unrelated removal quarantine\n");
   });
 
   it("does not follow a replaced marker directory during removal", async () => {
@@ -383,6 +427,37 @@ describe("Pi-owned global launcher installation", () => {
     },
   );
 
+  it("rejects a recovery target swapped between containment and digest authentication", async () => {
+    const fixture = await piUserPackageFixture("recovery-auth-swap");
+    const previous = await activateGlobalLauncher(fixture.environment);
+    const next = await addPackageGeneration(fixture, "recovery-auth-swap-next");
+    const interruptedEnvironment = {
+      ...next.environment,
+      [GLOBAL_LAUNCHER_TEST_HOOK]: async (point: GlobalLauncherMutationPoint) => {
+        if (point === "before_launcher_rename") throw new Error("seed pending journal");
+      },
+    };
+    await expect(activateGlobalLauncher(interruptedEnvironment)).rejects.toThrow(
+      "seed pending journal",
+    );
+    const recoveryEnvironment = {
+      ...next.environment,
+      [GLOBAL_LAUNCHER_TEST_HOOK]: async (point: GlobalLauncherMutationPoint) => {
+        if (point !== "after_recovery_target_containment") return;
+        await replacePackageBinWithExternalIdentical(
+          next.environment.packageRoot,
+          path.join(fixture.root, "external-auth-swap-bin"),
+        );
+      },
+    };
+
+    await expect(removeGlobalLauncher(recoveryEnvironment)).rejects.toThrow(
+      /changed during authentication|escapes its package/u,
+    );
+    expect(await readlink(previous!.launcherPath)).toBe(previous!.launcherTarget);
+    expect(JSON.parse(await readFile(fixture.markerPath, "utf8"))).toEqual(previous);
+  });
+
   it("runs the lifecycle adapter as a no-op outside a Pi user-package install", async () => {
     const root = await temporaryRoot("lifecycle-noop");
     const agentDir = path.join(root, "agent");
@@ -473,6 +548,25 @@ async function replacePackageBinWithExternalIdentical(
   await mkdir(externalBin, { recursive: true });
   await writeFile(path.join(externalBin, "koni.js"), launcherBytes, { mode: 0o755 });
   await symlink(externalBin, packageBin, "dir");
+}
+
+async function replaceQuarantineWithUnrelated(
+  directory: string,
+  expectedTarget: string,
+  bytes: string,
+): Promise<string> {
+  for (const entry of await readdir(directory)) {
+    const candidate = path.join(directory, entry);
+    try {
+      if ((await readlink(candidate)) !== expectedTarget) continue;
+      await unlink(candidate);
+      await writeFile(candidate, bytes, { mode: 0o755 });
+      return candidate;
+    } catch {
+      // The publication temp or an unrelated directory entry is not the owned quarantine.
+    }
+  }
+  throw new Error("owned launcher quarantine not found");
 }
 
 async function runLifecycle(
