@@ -46,18 +46,16 @@ Install Core and the profile you want through the Pi package manager you already
 ```sh
 pi install npm:@koni/core
 pi install npm:@koni/coding-profile
-# Optional when this Pi installation will also run research projects:
-pi install npm:@koni/research-profile
-
-# Expose Core's standalone command from the same Pi-managed closure.
-export PATH="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/npm/node_modules/.bin:$PATH"
-
-mkdir my-project && cd my-project
-git init
-koni init coding
+cd /path/to/project
+koni init
 koni tui
 # Or type /koni in an ordinary interactive Pi session.
 ```
+
+The Coding profile is the default for bare `koni init`. To use the optional Research profile, also
+install it with `pi install npm:@koni/research-profile` and explicitly run `koni init research`.
+Global Koni packages are passive outside initialized repositories: they do not create a project,
+run, authority, or provider request on install or load.
 
 Koni uses that Pi installation's normal credentials, providers, models, settings, and interactive
 resources. Loading the extension does not authenticate, start an authority, or change the Pi
@@ -67,9 +65,10 @@ Pi's managed npm closure supplies both the extension and its `.bin/koni` link. T
 your active Pi 0.80.10 package, verifies it, and propagates that exact peer bridge into authority
 and attempt children.
 
-A source checkout uses `./scripts/install-dev.sh`, which builds and registers the same three package
-payloads. That installer uses versioned, retained package roots and one locked Pi-settings update,
-so unrelated resources and already-running authority bytes are never overwritten.
+Maintainers working from a source checkout use `./scripts/install-dev.sh`; end users should use the
+Pi install commands above. The maintainer installer builds and registers the same three package
+payloads with versioned, retained package roots and one locked Pi-settings update, so unrelated
+resources and already-running authority bytes are never overwritten.
 
 To update the one managed closure without interrupting work, quiesce each active project before the
 package update, then start it with the new Core. Quiescing durably pauses runs and aborts contained
@@ -136,11 +135,11 @@ branch.
 
 ## Initialize a project
 
-Run `koni init` from anywhere inside an existing Git worktree:
+Run bare `koni init` from anywhere inside an existing Git worktree:
 
 ```sh
 cd my-project
-koni init coding             # or: koni init research
+koni init                    # Coding (default); or: koni init research
 koni config validate
 koni tui                     # opens only in this terminal
 # Or type /koni inside Pi.
@@ -150,6 +149,9 @@ The selected verified package is materialized under `.koni`. A later `koni updat
 explicit three-way baseline and overlay upgrade. Existing project configuration and every unrelated
 agent-tool resource — `.pi`, `.claude`, `.codex`, and anything else in the repository — stay
 project-owned.
+
+Inside Pi, `/koni init` opens guided Configure so you can choose and review initialization. It stays
+at that approval boundary: it does not create a run, authority run state, or provider attempt.
 
 Bare `koni` prints help. Koni never creates a terminal, tmux, or cmux pane on your behalf. The TUI
 opens only in the terminal where you invoke `koni tui`.

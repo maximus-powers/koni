@@ -7,9 +7,12 @@ Its extension only advertises an immutable profile bundle to `@koni/core`. Insta
 the npm package does not silently adopt new defaults into an existing project. Core materializes the
 selected baseline and preserves project edits through explicit three-way upgrades.
 
-Initialize it with `koni init coding`. Small, Medium, Large, New Feature, and Bug Fix are complete
-run-type peers inside this one broad profile package, not separately installed runtime extensions.
-Any staged upstream change is compared with the project version before the operator resolves it.
+Install it with `pi install npm:@koni/coding-profile`, then initialize an existing Git project with
+bare `koni init`. Coding is the default profile. Small, Medium, Large, New Feature, and Bug Fix are
+complete run-type peers inside this one broad profile package, not separately installed runtime
+extensions. Globally installed packages remain passive outside initialized repositories: they do not
+create a run, authority, or provider attempt. Any staged upstream change is compared with the
+project version before the operator resolves it.
 
 > Release transition (2026-07-18): Coding `0.8.0` publishes the reviewed Pi-native defaults and an
 > authenticated, preview-required retirement from the exact official `0.7.0` bundle. Project edits

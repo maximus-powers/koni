@@ -37,19 +37,22 @@ promotion. Pause, stop, restart, and explicit resume preserve known durable stat
 an unknown recovery condition, stop and reconcile it instead of editing authority state by hand.
 
 Core stores authority state in the Git common directory, so it requires an existing Git worktree
-even for profile installation. In a brand-new directory, run `git init` before
-`koni init coding|research`. Initialization still creates no run and no commit.
+even for profile installation. In a brand-new directory, run `git init` before `koni init`.
+Initialization still creates no run and no commit.
 
 ## Install
 
 ```sh
 pi install npm:@koni/core
 pi install npm:@koni/coding-profile
-pi install npm:@koni/research-profile   # optional research domain
-
-# Expose the standalone command from that same Pi-managed package closure:
-export PATH="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/npm/node_modules/.bin:$PATH"
+cd /path/to/project
+koni init
 ```
+
+Bare `koni init` selects Coding. Research is optional: install it with
+`pi install npm:@koni/research-profile`, then use `koni init research`. Globally installed Koni
+packages remain passive outside initialized repositories: loading or installing them creates no
+project, run, authority, or provider attempt.
 
 Koni never reads or copies Pi credentials, and it never rewrites unrelated settings or resources.
 Installing through Pi does add Pi's own Koni package entries. The source installer transactionally
@@ -60,21 +63,20 @@ There is no second global Koni copy in the install flow. Pi's managed `.bin/koni
 the same exact Core and profile bytes. Koni's launcher resolves and verifies your Pi 0.80.10
 installation. No Koni closure may contain Pi or TypeBox below itself.
 
-### From a source checkout
+### For maintainers: source checkout
 
 ```sh
 git clone https://github.com/maximus-powers/koni.git
 cd koni
 ./scripts/install-dev.sh
-export PATH="${KONI_INSTALL_PREFIX:-$HOME/.local}/bin:$PATH"
 koni --version
 ```
 
-The installer uses the ordinary Node and npm that Pi already requires. It checks, packs, and
-installs the same three payloads beneath `${KONI_INSTALL_PREFIX:-$HOME/.local}`. It registers only
-those three versioned local package sources in one locked Pi-settings update. It retains older bytes
-for running authorities and preserves authentication plus every unrelated package and resource
-setting.
+This is a maintainer-only workflow; end users should install with `pi install npm:@koni/*`. The
+installer uses the ordinary Node and npm that Pi already requires. It checks, packs, and installs
+the same three payloads beneath `${KONI_INSTALL_PREFIX:-$HOME/.local}`. It registers only those
+three versioned local package sources in one locked Pi-settings update. It retains older bytes for
+running authorities and preserves authentication plus every unrelated package and resource setting.
 
 Provider login and model discovery stay in Pi. Core installs no second credential store and no
 second runtime host. Whichever providers you authenticated in Pi — Anthropic Claude, OpenAI Codex,
@@ -108,28 +110,30 @@ Koni commands until one current Core source remains and the operator reloads Pi.
 
 ## Initialize a project
 
-Run `koni init coding` or `koni init research` inside an existing Git project. Then invoke `/koni`
-from Pi, or `koni tui` in the terminal you chose. Koni does not open a terminal pane itself.
+Run bare `koni init` inside an existing Git project to install Coding, or explicitly use
+`koni init research` after installing the optional Research profile. Then invoke `/koni` from Pi, or
+`koni tui` in the terminal you chose. Koni does not open a terminal pane itself.
 
 ```sh
 cd /path/to/project
 git init                        # only for a brand-new directory
-koni init coding --root .       # or: koni init research --root .
+koni init                       # Coding (default); or: koni init research
 koni config validate --root .
 
 # Then type /koni in an ordinary Pi session, or explicitly run:
 koni tui --root .
 ```
 
-Core accepts the explicit package profile (`coding` or `research`), `--profile-package` for a
-reviewed package path, and `--root` for project discovery. Guided configuration and run control live
-in the shared control center.
+Core accepts an explicit package profile (`coding` or `research`), `--profile-package` for a
+reviewed package path, and `--root` for project discovery. `/koni init` enters guided Configure,
+where initialization remains pending explicit approval and creates no run, authority run state, or
+provider attempt. Guided configuration and run control live in the shared control center.
 
 Interactive initialization asks which bundled project profile to install before it writes anything.
 Choose Coding for evidence-guided vertical delivery of code changes, or Research for executable,
-receipt-backed empirical work. Non-interactive callers must name the source explicitly. There is no
-silent profile default. An unchanged existing installation retains its already-selected source
-without prompting.
+receipt-backed empirical work. Bare shell initialization defaults to Coding; callers can explicitly
+choose Research. An unchanged existing installation retains its already-selected source without
+prompting.
 
 Before publishing any files, initialization stages a complete installation, validates all catalog
 and profile references, and checks its owned-file manifest.
