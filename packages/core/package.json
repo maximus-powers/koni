@@ -58,7 +58,10 @@
   "scripts": {
     "build": "node ../../scripts/clean-package-build.mjs . && tsc -p tsconfig.build.json && node ../../scripts/copy-core-skills.mjs && node ../../scripts/embed-core-build-identity.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
+    "test": "pnpm run test:parallel && pnpm run test:exclusive",
+    "test:parallel": "vitest run --config vitest.parallel.config.ts",
+    "test:exclusive": "vitest run --config vitest.exclusive.config.ts",
+    "test:file": "vitest run",
     "check": "pnpm run typecheck && pnpm run test && pnpm run build"
   },
   "dependencies": {
