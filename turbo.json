@@ -1,0 +1,33 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "ui": "stream",
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"]
+    },
+    "typecheck": {
+      "dependsOn": ["^typecheck"],
+      "outputs": []
+    },
+    "test": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "check": {
+      "dependsOn": ["typecheck", "test", "build"],
+      "outputs": []
+    },
+    "//#check:brand": {},
+    "//#test:architecture": {},
+    "//#test:docs": {},
+    "//#test:pi-host-boundary": {},
+    "//#test:pi-package": {
+      "dependsOn": ["@koni/core#build"],
+      "cache": false
+    },
+    "//#test:profiles": {},
+    "//#test:repository-gates": {},
+    "//#test:turborepo": {}
+  }
+}

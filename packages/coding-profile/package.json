@@ -40,7 +40,7 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "check": "npm run typecheck && npm run test"
+    "check": "pnpm run typecheck && pnpm run test"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"

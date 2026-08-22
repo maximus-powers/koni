@@ -9,14 +9,11 @@
     "type": "git",
     "url": "git+https://github.com/maximus-powers/koni.git"
   },
-  "workspaces": [
-    "packages/*"
-  ],
   "engines": {
     "node": ">=22.19.0"
   },
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
+    "build": "turbo run build",
     "check:brand": "./scripts/check-brand.sh",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -24,13 +21,15 @@
     "lint:fix": "eslint . --fix",
     "lint:shell": "bash -n scripts/*.sh",
     "test:architecture": "node --test scripts/architecture-budget.test.mjs",
-    "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run test:profiles && npm run test --workspaces --if-present && npm run test:pi-package",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test test:profiles test:turborepo test:pi-package",
     "test:docs": "node --test scripts/docs-links.test.mjs",
     "test:profiles": "node --test scripts/profile-bundles.test.mjs",
     "test:pi-host-boundary": "node --test scripts/pi-host-boundary.test.mjs",
-    "test:pi-package": "npm run build --workspace @koni/core && node --test scripts/pi-package-smoke.test.mjs",
-    "check": "npm run lint && npm run lint:shell && npm run format:check && node --test scripts/check-brand.test.mjs scripts/pi-git-package-resolution.test.mjs scripts/pi-git-production-pin.test.mjs scripts/provider-free-environment.test.mjs scripts/release-workflow.test.mjs && npm run check:brand && npm run test:docs && npm run test:architecture && npm run test:profiles && npm run test:pi-host-boundary && node --test scripts/clean-package-build.test.mjs && npm run check --workspaces --if-present && node --test scripts/pi-package-smoke.test.mjs",
+    "test:pi-package": "node --test scripts/pi-package-smoke.test.mjs",
+    "test:turborepo": "node --test scripts/turborepo-migration.test.mjs",
+    "test:repository-gates": "node --test scripts/check-brand.test.mjs scripts/pi-git-package-resolution.test.mjs scripts/pi-git-production-pin.test.mjs scripts/provider-free-environment.test.mjs scripts/release-workflow.test.mjs scripts/clean-package-build.test.mjs",
+    "check": "pnpm run lint && pnpm run lint:shell && pnpm run format:check && turbo run test:repository-gates check:brand test:docs test:architecture test:profiles test:pi-host-boundary test:turborepo check test:pi-package",
     "profiles:capture": "node scripts/capture-profile-bundles.mjs --publish-current"
   },
   "devDependencies": {
@@ -47,7 +46,8 @@
     "typebox": "1.1.38",
     "typescript": "5.9.3",
     "typescript-eslint": "8.65.0",
+    "turbo": "2.10.5",
     "vitest": "4.1.10"
   },
-  "packageManager": "npm@11.13.0"
+  "packageManager": "pnpm@11.13.1"
 }

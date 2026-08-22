@@ -13,3 +13,4 @@ private/
 *.log
 .DS_Store
 /.worktrees/
+/.turbo/

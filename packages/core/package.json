@@ -59,7 +59,7 @@
     "build": "node ../../scripts/clean-package-build.mjs . && tsc -p tsconfig.build.json && node ../../scripts/copy-core-skills.mjs && node ../../scripts/embed-core-build-identity.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "check": "npm run typecheck && npm run test && npm run build"
+    "check": "pnpm run typecheck && pnpm run test && pnpm run build"
   },
   "dependencies": {
     "semver": "7.8.5",

@@ -33,7 +33,7 @@ export function verifyPiHostBoundary({ lock, manifests }) {
     throw new Error("the tested Pi host boundary requires an npm lockfileVersion 3 package tree");
   }
   const host = lock.packages[CODING_AGENT_LOCK_PATH];
-  if (!host) throw new Error(`${CODING_AGENT} is missing from the root development lock`);
+  if (!host) throw new Error(`${CODING_AGENT} is missing from the npm compatibility fixture`);
 
   const resolved = {};
   for (const name of PI_PACKAGES) {
@@ -109,7 +109,7 @@ export async function verifyRepositoryPiHostBoundary(root = process.cwd()) {
     ].map((file) => readJson(path.join(root, file))),
   );
   return verifyPiHostBoundary({
-    lock: await readJson(path.join(root, "package-lock.json")),
+    lock: await readJson(path.join(root, "scripts/fixtures/pi-host-package-lock.json")),
     manifests,
   });
 }

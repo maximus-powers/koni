@@ -79,8 +79,13 @@ test("the workflow validator fails closed on a drifted nested Pi package", () =>
   assert.throws(() => verifyPiHostBoundary(value), /pi-ai lock is 0\.80\.11/u);
 });
 
-test("the checked-in npm closure satisfies the provider-free release boundary", async () => {
+test("the checked-in npm compatibility fixture satisfies the provider-free release boundary", async () => {
   const boundary = await verifyRepositoryPiHostBoundary();
   assert.equal(boundary.pi, EXACT_PI_VERSION);
   assert.equal(boundary.typebox, EXACT_TYPEBOX_VERSION);
+  assert.equal(
+    boundary.tested_lock_closure["@earendil-works/pi-coding-agent"].version,
+    EXACT_PI_VERSION,
+  );
+  assert.equal(boundary.tested_lock_closure.typebox.version, EXACT_TYPEBOX_VERSION);
 });
