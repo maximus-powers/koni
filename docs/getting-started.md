@@ -69,7 +69,7 @@ installation. No Koni closure may contain Pi or TypeBox below itself.
 git clone https://github.com/maximus-powers/koni.git
 cd koni
 ./scripts/install-dev.sh
-koni --version
+"${KONI_INSTALL_PREFIX:-$HOME/.local}/bin/koni" --version
 ```
 
 This is a maintainer-only workflow; end users should install with `pi install npm:@koni/*`. The
@@ -77,6 +77,8 @@ installer uses the ordinary Node and npm that Pi already requires. It checks, pa
 the same three payloads beneath `${KONI_INSTALL_PREFIX:-$HOME/.local}`. It registers only those
 three versioned local package sources in one locked Pi-settings update. It retains older bytes for
 running authorities and preserves authentication plus every unrelated package and resource setting.
+The verification command invokes the installed launcher directly: by default that is
+`$HOME/.local/bin/koni`; if you set `KONI_INSTALL_PREFIX`, it uses that prefix's `bin/koni` instead.
 
 Provider login and model discovery stay in Pi. Core installs no second credential store and no
 second runtime host. Whichever providers you authenticated in Pi — Anthropic Claude, OpenAI Codex,
