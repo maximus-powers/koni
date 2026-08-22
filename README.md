@@ -61,9 +61,10 @@ Koni uses that Pi installation's normal credentials, providers, models, settings
 resources. Loading the extension does not authenticate, start an authority, or change the Pi
 session. Work starts only after an explicit Koni command.
 
-Pi's managed npm closure supplies both the extension and its `.bin/koni` link. The launcher locates
-your active Pi 0.80.10 package, verifies it, and propagates that exact peer bridge into authority
-and attempt children.
+Pi's managed npm closure supplies the extension. Core activation publishes an authenticated launcher
+beside the resolved `pi` executable, so it is available anywhere that `pi` already is. The launcher
+verifies the exact managed Core and Pi 0.80.10 bytes before propagating that peer bridge into
+authority and attempt children.
 
 Maintainers working from a source checkout use `./scripts/install-dev.sh`; end users should use the
 Pi install commands above. The maintainer installer builds and registers the same three package
@@ -81,6 +82,7 @@ pi update npm:@koni/coding-profile
 pi update npm:@koni/research-profile   # only when installed
 pi update npm:@koni/core
 # Then close/reopen Pi, or run /reload in every already-open Pi session.
+koni update --root /path/to/project
 koni start --root /path/to/project
 # Explicitly resume each run that should continue.
 ```
@@ -150,8 +152,9 @@ explicit three-way baseline and overlay upgrade. Existing project configuration 
 agent-tool resource — `.pi`, `.claude`, `.codex`, and anything else in the repository — stay
 project-owned.
 
-Inside Pi, `/koni init` opens guided Configure so you can choose and review initialization. It stays
-at that approval boundary: it does not create a run, authority run state, or provider attempt.
+Inside Pi, `/koni init` immediately installs and validates Coding by default, then opens guided
+Configure. Configure waits for approval before applying its proposed project-specific edits. Neither
+initialization nor that handoff creates a run, authority run state, or provider attempt.
 
 Bare `koni` prints help. Koni never creates a terminal, tmux, or cmux pane on your behalf. The TUI
 opens only in the terminal where you invoke `koni tui`.

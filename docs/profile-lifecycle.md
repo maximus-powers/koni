@@ -16,11 +16,13 @@ koni conflicts path/to/file.yaml --keep-project --root .
 ```
 
 The same lifecycle is reachable through `/koni init|update|conflicts` and the shared Configure UI.
-`/koni init` enters guided Configure and waits for explicit approval; it does not create a run,
-authority run state, or provider attempt. Configure shows **[u] Open comparison** when upstream
-changes are pending, keeps the current project and authenticated upstream documents side by side,
-and sends lifecycle/source CAS values as hidden control data. It never exposes those implementation
-hashes as choices or writes YAML directly.
+Bare `/koni init` immediately installs and validates Coding before entering guided Configure;
+explicit Research selection behaves the same way. Configure waits for approval only before applying
+its later project-specific edits. Neither step creates a run, authority run state, or provider
+attempt. Configure shows **[u] Open comparison** when upstream changes are pending, keeps the
+current project and authenticated upstream documents side by side, and sends lifecycle/source CAS
+values as hidden control data. It never exposes those implementation hashes as choices or writes
+YAML directly.
 
 ## Ownership boundary
 

@@ -59,8 +59,9 @@ Installing through Pi does add Pi's own Koni package entries. The source install
 replaces only Koni-owned package entries. If activation fails, it rolls that change back together
 with its launcher.
 
-There is no second global Koni copy in the install flow. Pi's managed `.bin/koni` and `/koni` load
-the same exact Core and profile bytes. Koni's launcher resolves and verifies your Pi 0.80.10
+There is no second global Koni copy in the install flow. Pi owns the managed package closure; Core
+activation publishes only an authenticated launcher beside the resolved `pi` executable. That
+launcher and `/koni` load the same exact Core and profile bytes and verify your Pi 0.80.10
 installation. No Koni closure may contain Pi or TypeBox below itself.
 
 ### For maintainers: source checkout
@@ -92,13 +93,16 @@ First run `koni stop --root /path/to/project`. Then update only the installed Ko
 pi update npm:@koni/coding-profile
 pi update npm:@koni/research-profile   # only when installed
 pi update npm:@koni/core
+# Then close/reopen Pi, or run /reload in every already-open Pi session.
+koni update --root /path/to/project
+koni start --root /path/to/project
 ```
 
 Do not use the broad `pi update --extensions`, which also replaces unrelated community packages.
-Close and reopen Pi, or run `/reload` in every already-open Pi session, before
-`koni start --root /path/to/project`. A stopped authority cannot unload old extension code that Pi
-already holds in memory. Stop durably pauses runs and aborts contained sessions before the bytes
-change. Start uses the new Core and leaves those runs paused for an explicit resume.
+Reload Pi before the project-level `koni update`, then restart the authority. A stopped authority
+cannot unload old extension code that Pi already holds in memory. Stop durably pauses runs and
+aborts contained sessions before the bytes change. `koni update` applies the new profile baseline to
+the existing project; start uses the new Core and leaves paused runs for an explicit resume.
 
 When Koni was installed with `./scripts/install-dev.sh`, keep the same stop, reload, start, and
 explicit-resume sequence. Rerun `./scripts/install-dev.sh` instead of any `pi update npm:@koni/*`
@@ -127,15 +131,14 @@ koni tui --root .
 ```
 
 Core accepts an explicit package profile (`coding` or `research`), `--profile-package` for a
-reviewed package path, and `--root` for project discovery. `/koni init` enters guided Configure,
-where initialization remains pending explicit approval and creates no run, authority run state, or
-provider attempt. Guided configuration and run control live in the shared control center.
+reviewed package path, and `--root` for project discovery. Bare `/koni init` immediately installs
+and validates Coding; explicit `/koni init research` does the same for Research. Only the subsequent
+guided Configure proposals wait for approval before editing project configuration. Initialization,
+guided configuration, and their handoff create no run, authority run state, or provider attempt.
 
-Interactive initialization asks which bundled project profile to install before it writes anything.
-Choose Coding for evidence-guided vertical delivery of code changes, or Research for executable,
-receipt-backed empirical work. Bare shell initialization defaults to Coding; callers can explicitly
-choose Research. An unchanged existing installation retains its already-selected source without
-prompting.
+Coding supports evidence-guided vertical delivery of code changes. Research supports executable,
+receipt-backed empirical work. An unchanged existing installation retains its already-selected
+source without prompting.
 
 Before publishing any files, initialization stages a complete installation, validates all catalog
 and profile references, and checks its owned-file manifest.

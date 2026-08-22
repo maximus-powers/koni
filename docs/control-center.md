@@ -18,8 +18,9 @@ start an authority, mutate Pi settings or resources, or stop Pi. Globally instal
 passive outside initialized repositories. Inert means no passive authority start, recovery, provider
 request, model load, or durable effect.
 
-`/koni init` enters guided Configure. It can collect and present initialization choices, but stays
-at the explicit approval boundary and creates no run, authority run state, or provider attempt.
+`/koni init` immediately installs and validates Coding by default, then enters guided Configure.
+Configure waits for explicit approval before applying proposed project-specific edits. The
+initialization and handoff create no run, authority run state, or provider attempt.
 
 In a trusted initialized project, Pi TUI sessions attach a bounded read-only background-run widget
 even when the authority is stopped and there are no runs. With runs present, the widget gives each

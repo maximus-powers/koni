@@ -47,9 +47,12 @@ Installation must fail closed when:
 The failure explains the exact conflict and leaves the prior launcher and Pi settings unchanged.
 Koni never edits shell startup files.
 
-Updates atomically replace only the authenticated Koni-owned launcher. Uninstall removes that
-launcher only when it still points to the package generation being removed; it never deletes an
-unrelated or newer launcher.
+Updates atomically replace only the authenticated Koni-owned launcher. Pi 0.80.10 delegates removal
+to npm, and npm 11 does not invoke package uninstall hooks, so Core cannot remove an external
+launcher during `pi remove` without changing Pi. The launcher therefore remains a small,
+authenticated executable rather than a broken package-target link. Its first invocation after Core
+removal authenticates and displaces only its own public path and ownership marker, then reports the
+exact reinstall command. It never deletes an unrelated or newer launcher.
 
 Coding and Research profiles remain separate Pi packages. Coding is required for the default
 initialization path; Research is optional.
@@ -117,17 +120,20 @@ Explicit `/koni init research` remains available when the Research package is in
 
 ### Package-owned launcher activation
 
-Core adds a small installation-lifecycle entry point used by its npm lifecycle hooks. It resolves
+Core adds a small installation-lifecycle entry point used by its npm installation hook. It resolves
 the real `pi` command visible to the installing process, derives its executable directory, and
-publishes a platform-appropriate launcher there:
+publishes a platform-appropriate self-cleaning launcher there:
 
-- POSIX: an atomic symlink or launcher file named `koni`;
-- Windows: the corresponding command shim required by the resolved Pi installation.
+- POSIX: an atomic executable launcher file named `koni`;
+- Windows: a command shim containing the same authenticated launcher bootstrap.
 
 Launcher ownership is recorded in a bounded, authenticated marker under Pi's agent-owned Koni state.
-The marker binds protocol version, launcher path, exact Core package root, launcher target, and
-package identity. Publication uses an adjacent temporary path plus atomic rename. Recovery handles
-interruption before and after launcher replacement without inferring ownership from a bare filename.
+The marker binds protocol version, launcher path and digest, exact Core package root, launcher
+target, and package identity. Publication uses an adjacent temporary path plus atomic rename. The
+journal records the exact old-launcher displacement path before moving it. Recovery accepts an
+npm-style replacement at the same package root when the new target, old launcher, marker, and
+journal all authenticate, and handles interruption before and after launcher replacement without
+inferring ownership from a bare filename.
 
 This extends the existing development activation model rather than creating a second Koni
 installation. The Pi-managed package remains the only package closure; the global launcher is only
