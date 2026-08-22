@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
+import { findPackageJSON } from "node:module";
 import {
   chmod,
   cp,
@@ -275,13 +276,17 @@ test(
         JSON.parse(await readFile(path.join(piPackageRoot, "package.json"), "utf8")).version,
         stockPiVersion,
       );
+      const piTypeboxManifest = findPackageJSON(
+        "typebox",
+        pathToFileURL(path.join(piPackageRoot, "package.json")),
+      );
+      assert.notEqual(
+        piTypeboxManifest,
+        undefined,
+        "stock Pi must resolve its exact TypeBox runtime",
+      );
       assert.equal(
-        JSON.parse(
-          await readFile(
-            path.join(piPackageRoot, "node_modules", "typebox", "package.json"),
-            "utf8",
-          ),
-        ).version,
+        JSON.parse(await readFile(piTypeboxManifest, "utf8")).version,
         stockTypeboxVersion,
       );
       await assertLauncherDiscoveryShapes({ root, pi, piPackageRoot });
@@ -923,10 +928,15 @@ async function exactArchives(root) {
     configured === undefined ? path.join(root, "archives") : path.resolve(configured);
   if (configured === undefined) {
     await mkdir(archiveDirectory);
-    for (const workspace of publicPackages.keys()) {
+    for (const packageDirectory of publicPackages.values()) {
       await execFileAsync(
         "npm",
-        ["pack", "--workspace", workspace, "--pack-destination", archiveDirectory],
+        [
+          "pack",
+          path.join(repositoryRoot, "packages", packageDirectory),
+          "--pack-destination",
+          archiveDirectory,
+        ],
         { cwd: repositoryRoot },
       );
     }
@@ -3573,13 +3583,17 @@ async function exerciseInstalledPiResources({ pi, project, agent, environment })
     child.stdin.write(
       `${JSON.stringify({ id: "init", type: "prompt", message: "/koni init coding" })}\n`,
     );
-    await waitForRpcResponse(
+    const initResponse = await waitForRpcResponse(
       child,
       () => stdout,
       () => stderr,
       "init",
     );
-    assert.equal(existsSync(path.join(project, ".koni", "project.yaml")), true);
+    assert.equal(
+      existsSync(path.join(project, ".koni", "project.yaml")),
+      true,
+      JSON.stringify({ initResponse, stdout, stderr }),
+    );
     assert.equal(existsSync(path.join(project, ".koni", ".managed", "install.json")), true);
 
     child.stdin.write(

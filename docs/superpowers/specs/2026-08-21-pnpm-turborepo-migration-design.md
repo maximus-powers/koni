@@ -79,6 +79,14 @@ The file classification is centralized in test configuration rather than duplica
 Every core test file must belong to exactly one lane. A small Node test verifies disjointness and
 full coverage so new test files cannot silently bypass classification.
 
+Integration validation finalized the split at 103 isolated files and five exclusive files.
+`run-authority-engine.test.ts` moved to the exclusive lane after its 148 real authority-engine,
+socket, and child-Git lifecycles produced two polling/lifecycle timing failures under four-worker OS
+contention; both affected tests passed when the file ran without competing test files.
+`profile-install.test.ts` also moved after warm integration exposed its process-global
+`fs.promises.open`/`rename` replacement and `syncBuiltinESMExports()` fault injection: both affected
+durability tests passed when the file ran in isolation.
+
 The setup fixture remains hermetic. Each worker receives an independent Pi agent directory, so no
 parallel test mutates another worker's environment or fixture tree.
 
@@ -104,6 +112,12 @@ Release jobs continue using npm for:
 Source checkout installation, builds, checks, and tests use pnpm. `scripts/install-dev.sh` requires
 the pinned pnpm version for repository operations and retains npm for disposable runtime closure
 materialization.
+
+The npm/Pi release rehearsal remains package-manager-layout agnostic: stock npm packs each explicit
+public package directory without requiring npm workspace metadata, and the rehearsal resolves Pi's
+exact TypeBox runtime from Pi's package boundary. The Koni launcher follows a normal wrapper into
+the pnpm-generated Pi shim before authenticating the real Pi package root; opaque active wrappers
+still fail closed.
 
 ## CI and Documentation
 

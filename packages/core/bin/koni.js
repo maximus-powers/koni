@@ -53,10 +53,12 @@ export function findPiPackageRoot() {
     }
   }
   if (activeExecutable !== undefined) {
+    const directShimCandidates = shimCandidates(activeExecutable);
     const root = firstValidPiRoot([
       activeExecutable,
       realpathOrSelf(activeExecutable),
-      ...shimCandidates(activeExecutable),
+      ...directShimCandidates,
+      ...directShimCandidates.flatMap((candidate) => shimCandidates(candidate)),
     ]);
     if (root !== undefined) return root;
     throw new Error(
