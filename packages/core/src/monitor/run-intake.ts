@@ -166,7 +166,7 @@ export async function prepareGuidedRunIntake(
       kind: "blocked",
       reason: "uninitialized",
       message:
-        "Koni is not initialized in this repository. Run `/koni init coding` or `/koni init research`, then retry `/koni-run`.",
+        "Koni is not initialized in this repository. Run `koni init` or `/koni init`, then retry.",
     };
   }
   const connection = await options.connect();
