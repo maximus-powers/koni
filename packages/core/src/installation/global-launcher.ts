@@ -8,11 +8,9 @@ import {
   mkdir,
   open,
   readFile,
-  readlink,
   realpath,
   rename,
   stat,
-  symlink,
   unlink,
   writeFile,
 } from "node:fs/promises";
@@ -47,13 +45,20 @@ export interface GlobalLauncherActivation {
   packageRoot: string;
   launcherTarget: string;
   targetSha256: string;
+  launcherSha256: string;
 }
+
+type LauncherIdentity = Omit<GlobalLauncherActivation, "launcherSha256"> & {
+  markerPath: string;
+  argumentOffset: number;
+};
 
 interface ActivationJournal {
   protocol: "koni.global-launcher-journal.v1";
   operation: "activate";
   previous: GlobalLauncherActivation | null;
   next: GlobalLauncherActivation;
+  displacedPath: string | null;
 }
 
 type HookedEnvironment = GlobalLauncherEnvironment & {
@@ -90,11 +95,11 @@ export async function activateGlobalLauncher(
     environment.platform === "win32" ? "koni.cmd" : "koni",
   );
   await assertWritableDirectory(path.dirname(launcherPath), "Pi launcher");
-  const activation = await activationFor(environment, launcherPath);
   const markerDirectory = path.join(path.resolve(environment.agentDir), "koni");
   await ensurePrivateMarkerDirectory(environment.agentDir, markerDirectory);
   const markerPath = path.join(markerDirectory, "global-launcher.json");
   const journalPath = path.join(markerDirectory, "global-launcher.pending.json");
+  const activation = await activationFor(environment, launcherPath, markerPath);
   await recoverPendingActivation(environment, markerPath, journalPath, launcherPath);
   const marker = await readOwnershipMarker(markerPath, environment, launcherPath);
   const launcherExists = await pathExistsNoFollow(launcherPath);
@@ -109,6 +114,7 @@ export async function activateGlobalLauncher(
     const authenticated =
       launcherExists &&
       (await launcherMatches(marker, environment.platform)) &&
+      launcherDigestMatchesContent(marker, environment.platform, markerPath) &&
       ((await targetMatchesDigest(marker)) || sameTargetIdentity(marker, activation));
     if (!authenticated) {
       throw new Error(`refusing to overwrite an unrelated koni launcher at ${launcherPath}`);
@@ -121,9 +127,16 @@ export async function activateGlobalLauncher(
     operation: "activate",
     previous: marker ?? null,
     next: activation,
+    displacedPath: marker === undefined ? null : adjacentTemporary(launcherPath),
   };
   await publishFileAtomically(journalPath, `${JSON.stringify(journal, null, 2)}\n`, 0o600);
-  await publishLauncherConditionally(activation, marker ?? null, environment);
+  await publishLauncherConditionally(
+    activation,
+    marker ?? null,
+    environment,
+    true,
+    journal.displacedPath ?? undefined,
+  );
   await publishFileAtomically(markerPath, `${JSON.stringify(activation, null, 2)}\n`, 0o600, {
     before: "before_marker_rename",
     after: "after_marker_rename",
@@ -161,7 +174,7 @@ export async function removeGlobalLauncher(
   if (marker === "malformed" || marker.packageRoot !== path.resolve(environment.packageRoot)) {
     return "not_owner";
   }
-  const current = await activationFor(environment, launcherPath);
+  const current = await activationFor(environment, launcherPath, markerPath);
   if (!sameActivation(marker, current) || !(await targetMatchesDigest(marker))) return "not_owner";
   if (launcherExists && !(await launcherMatches(marker, environment.platform))) return "not_owner";
   if (launcherExists) {
@@ -186,13 +199,11 @@ async function recoverPendingActivation(
     throw new Error(`refusing malformed global launcher journal at ${journalPath}`);
   }
   if (
-    journal.previous !== null &&
-    (await digestTargetWithinPackage(
-      journal.previous.launcherTarget,
-      journal.previous.packageRoot,
-    )) !== journal.previous.targetSha256
+    !launcherDigestMatchesContent(journal.next, environment.platform, markerPath) ||
+    (journal.previous !== null &&
+      !launcherDigestMatchesContent(journal.previous, environment.platform, markerPath))
   ) {
-    throw new Error("refusing global launcher recovery because its previous target changed");
+    throw new Error(`refusing malformed global launcher journal at ${journalPath}`);
   }
   const nextDigest = await digestTargetWithinPackage(
     journal.next.launcherTarget,
@@ -201,6 +212,16 @@ async function recoverPendingActivation(
   );
   if (nextDigest !== journal.next.targetSha256) {
     throw new Error("refusing global launcher recovery because its intended target changed");
+  }
+  if (
+    journal.previous !== null &&
+    !sameTargetIdentity(journal.previous, journal.next) &&
+    (await digestTargetWithinPackage(
+      journal.previous.launcherTarget,
+      journal.previous.packageRoot,
+    )) !== journal.previous.targetSha256
+  ) {
+    throw new Error("refusing global launcher recovery because its previous target changed");
   }
   const marker = await readOwnershipMarker(markerPath, environment, launcherPath);
   if (
@@ -219,11 +240,25 @@ async function recoverPendingActivation(
     launcherExists &&
     journal.previous !== null &&
     (await launcherMatches(journal.previous, environment.platform));
-  if (!launcherIsNext && !launcherIsPrevious && (launcherExists || journal.previous !== null)) {
+  const displacedIsPrevious =
+    journal.previous !== null &&
+    journal.displacedPath !== null &&
+    (await launcherMatches(atPath(journal.previous, journal.displacedPath), environment.platform));
+  if (
+    !launcherIsNext &&
+    !launcherIsPrevious &&
+    (launcherExists || (journal.previous !== null && !displacedIsPrevious))
+  ) {
     throw new Error(`refusing to overwrite an unrelated koni launcher at ${launcherPath}`);
   }
   if (!launcherIsNext) {
-    await publishLauncherConditionally(journal.next, journal.previous, environment, false);
+    await publishLauncherConditionally(
+      journal.next,
+      launcherIsPrevious ? journal.previous : null,
+      environment,
+      false,
+      journal.displacedPath ?? undefined,
+    );
   }
   if (marker === undefined || !sameActivation(marker, journal.next)) {
     await publishFileAtomically(markerPath, `${JSON.stringify(journal.next, null, 2)}\n`, 0o600);
@@ -235,15 +270,22 @@ async function recoverPendingActivation(
 async function activationFor(
   environment: GlobalLauncherEnvironment,
   launcherPath: string,
+  markerPath: string,
 ): Promise<GlobalLauncherActivation> {
   const packageRoot = path.resolve(environment.packageRoot);
   const launcherTarget = path.join(packageRoot, "bin", "koni.js");
-  return {
+  const activation: Omit<GlobalLauncherActivation, "launcherSha256"> = {
     protocol: ACTIVATION_PROTOCOL,
     launcherPath,
     packageRoot,
     launcherTarget,
     targetSha256: await digestTargetWithinPackage(launcherTarget, packageRoot),
+  };
+  return {
+    ...activation,
+    launcherSha256: createHash("sha256")
+      .update(launcherContent(activation, environment.platform, markerPath))
+      .digest("hex"),
   };
 }
 
@@ -363,7 +405,11 @@ async function readActivationJournal(
     record.protocol !== JOURNAL_PROTOCOL ||
     record.operation !== "activate" ||
     !isActivationRecord(record.next) ||
-    (record.previous !== null && !isActivationRecord(record.previous))
+    (record.previous !== null && !isActivationRecord(record.previous)) ||
+    (record.previous === null
+      ? record.displacedPath !== null
+      : typeof record.displacedPath !== "string" ||
+        !isAdjacentTemporaryFor(record.next.launcherPath, record.displacedPath))
   ) {
     return "malformed";
   }
@@ -416,27 +462,24 @@ function isActivationRecord(value: unknown): value is GlobalLauncherActivation {
     typeof record.launcherTarget === "string" &&
     path.isAbsolute(record.launcherTarget) &&
     typeof record.targetSha256 === "string" &&
-    /^[a-f0-9]{64}$/u.test(record.targetSha256)
+    /^[a-f0-9]{64}$/u.test(record.targetSha256) &&
+    typeof record.launcherSha256 === "string" &&
+    /^[a-f0-9]{64}$/u.test(record.launcherSha256)
   );
 }
 
 async function launcherMatches(
   activation: GlobalLauncherActivation,
-  platform: NodeJS.Platform,
+  _platform: NodeJS.Platform,
 ): Promise<boolean> {
   try {
     const metadata = await lstat(activation.launcherPath);
-    if (platform === "win32") {
-      return (
-        metadata.isFile() &&
-        !metadata.isSymbolicLink() &&
-        (await readFile(activation.launcherPath, "utf8")) === windowsShim(activation.launcherTarget)
-      );
-    }
-    if (!metadata.isSymbolicLink()) return false;
-    const target = await readlink(activation.launcherPath);
     return (
-      path.resolve(path.dirname(activation.launcherPath), target) === activation.launcherTarget
+      metadata.isFile() &&
+      !metadata.isSymbolicLink() &&
+      createHash("sha256")
+        .update(await readFile(activation.launcherPath))
+        .digest("hex") === activation.launcherSha256
     );
   } catch {
     return false;
@@ -467,7 +510,20 @@ function sameActivation(left: GlobalLauncherActivation, right: GlobalLauncherAct
     left.protocol === right.protocol &&
     left.launcherPath === right.launcherPath &&
     sameTargetIdentity(left, right) &&
-    left.targetSha256 === right.targetSha256
+    left.targetSha256 === right.targetSha256 &&
+    left.launcherSha256 === right.launcherSha256
+  );
+}
+
+function launcherDigestMatchesContent(
+  activation: GlobalLauncherActivation,
+  platform: NodeJS.Platform,
+  markerPath: string,
+): boolean {
+  return (
+    createHash("sha256")
+      .update(launcherContent(activation, platform, markerPath))
+      .digest("hex") === activation.launcherSha256
   );
 }
 
@@ -521,22 +577,27 @@ async function publishLauncherConditionally(
   previous: GlobalLauncherActivation | null,
   environment: GlobalLauncherEnvironment,
   invokeHooks = true,
+  intendedDisplacedPath?: string,
 ): Promise<void> {
   const temporary = adjacentTemporary(activation.launcherPath);
   let displaced: string | undefined;
   try {
-    if (environment.platform === "win32") {
-      await writeFile(temporary, windowsShim(activation.launcherTarget), {
+    await writeFile(
+      temporary,
+      launcherContent(
+        activation,
+        environment.platform,
+        path.join(path.resolve(environment.agentDir), "koni", "global-launcher.json"),
+      ),
+      {
         encoding: "utf8",
         flag: "wx",
         mode: 0o755,
-      });
-    } else {
-      await symlink(activation.launcherTarget, temporary, "file");
-    }
+      },
+    );
     if (invokeHooks) await callMutationHook(environment, "before_launcher_rename");
     if (previous !== null) {
-      displaced = adjacentTemporary(activation.launcherPath);
+      displaced = intendedDisplacedPath ?? adjacentTemporary(activation.launcherPath);
       try {
         await rename(activation.launcherPath, displaced);
       } catch {
@@ -589,22 +650,18 @@ async function removeLauncherIfOwned(
 
 async function publishNoReplace(source: string, destination: string): Promise<void> {
   const metadata = await lstat(source);
-  if (metadata.isSymbolicLink()) {
-    await symlink(await readlink(source), destination, "file");
-  } else {
-    await link(source, destination);
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error(`refusing to publish a non-regular launcher from ${source}`);
   }
+  await link(source, destination);
   await unlink(source);
 }
 
 async function restoreNoReplace(source: string, destination: string): Promise<void> {
   try {
     const metadata = await lstat(source);
-    if (metadata.isSymbolicLink()) {
-      await symlink(await readlink(source), destination, "file");
-    } else {
-      await link(source, destination);
-    }
+    if (!metadata.isFile() || metadata.isSymbolicLink()) return;
+    await link(source, destination);
   } catch (error) {
     if (!isCode(error, "EEXIST")) throw error;
   }
@@ -666,12 +723,185 @@ async function syncDirectory(directory: string): Promise<void> {
   }
 }
 
-function windowsShim(target: string): string {
-  return `@node "${target.replaceAll('"', '""')}" %*\r\n`;
+function launcherContent(
+  activation: Omit<GlobalLauncherActivation, "launcherSha256">,
+  platform: NodeJS.Platform,
+  markerPath: string,
+): string {
+  const identity: LauncherIdentity = {
+    protocol: activation.protocol,
+    launcherPath: activation.launcherPath,
+    packageRoot: activation.packageRoot,
+    launcherTarget: activation.launcherTarget,
+    targetSha256: activation.targetSha256,
+    markerPath,
+    argumentOffset: platform === "win32" ? 1 : 2,
+  };
+  const runtime = selfCleaningLauncherRuntime(identity);
+  if (platform === "win32") {
+    const encodedRuntime = Buffer.from(runtime, "utf8").toString("base64url");
+    return `@node -e "eval(Buffer.from('${encodedRuntime}','base64url').toString('utf8'))" -- %*\r\n`;
+  }
+  return `#!/usr/bin/env node\n${runtime}`;
+}
+
+function selfCleaningLauncherRuntime(identity: LauncherIdentity): string {
+  const encodedIdentity = Buffer.from(JSON.stringify(identity), "utf8").toString("base64url");
+  return `const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+const childProcess = require("node:child_process");
+const identity = JSON.parse(Buffer.from("${encodedIdentity}", "base64url").toString("utf8"));
+const activationFields = ["protocol", "launcherPath", "packageRoot", "launcherTarget", "targetSha256"];
+
+function openRegular(source) {
+  const handle = fs.openSync(source, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  try {
+    const opened = fs.fstatSync(handle);
+    if (!opened.isFile()) throw new Error("not a regular file");
+    return { bytes: fs.readFileSync(handle), handle, opened };
+  } catch (error) {
+    fs.closeSync(handle);
+    throw error;
+  }
+}
+
+function sha256(bytes) {
+  return crypto.createHash("sha256").update(bytes).digest("hex");
+}
+
+function sameActivation(marker) {
+  return activationFields.every((field) => marker[field] === identity[field]);
+}
+
+function restoreRegularNoReplace(source, destination) {
+  try {
+    fs.linkSync(source, destination);
+  } catch (error) {
+    if (!error || error.code !== "EEXIST") throw error;
+  }
+}
+
+function displaceAuthenticatedRegular(source, expectedSha256) {
+  const displaced = path.join(
+    path.dirname(source),
+    "." + path.basename(source) + "." + crypto.randomUUID() + ".stale",
+  );
+  fs.renameSync(source, displaced);
+  let matches = false;
+  let displacedFile;
+  try {
+    displacedFile = openRegular(displaced);
+    matches = sha256(displacedFile.bytes) === expectedSha256;
+  } catch {
+  } finally {
+    if (displacedFile) fs.closeSync(displacedFile.handle);
+  }
+  if (!matches) {
+    restoreRegularNoReplace(displaced, source);
+    throw new Error("refusing to remove a launcher path that changed during cleanup");
+  }
+  fs.chmodSync(displaced, 0o600);
+  return displaced;
+}
+
+function authenticateTarget() {
+  let target;
+  try {
+    target = openRegular(identity.launcherTarget);
+  } catch (error) {
+    if (error && error.code === "ENOENT") return false;
+    throw error;
+  }
+  try {
+    const physicalRoot = fs.realpathSync(identity.packageRoot);
+    const physicalTarget = fs.realpathSync(identity.launcherTarget);
+    if (path.dirname(physicalTarget) !== path.join(physicalRoot, "bin")) {
+      throw new Error("the installed Core launcher escapes its package");
+    }
+    const current = fs.statSync(physicalTarget);
+    if (current.dev !== target.opened.dev || current.ino !== target.opened.ino) {
+      throw new Error("the installed Core launcher changed during authentication");
+    }
+    if (sha256(target.bytes) !== identity.targetSha256) {
+      throw new Error("the installed Core launcher does not match its authenticated generation");
+    }
+    return true;
+  } finally {
+    fs.closeSync(target.handle);
+  }
+}
+
+function main() {
+  const launcher = openRegular(identity.launcherPath);
+  let marker;
+  try {
+    marker = openRegular(identity.markerPath);
+    const parsed = JSON.parse(marker.bytes.toString("utf8"));
+    if (
+      !sameActivation(parsed) ||
+      typeof parsed.launcherSha256 !== "string" ||
+      parsed.launcherSha256 !== sha256(launcher.bytes)
+    ) {
+      throw new Error("the global launcher ownership marker does not authenticate this executable");
+    }
+
+    if (!authenticateTarget()) {
+      fs.closeSync(launcher.handle);
+      launcher.handle = undefined;
+      fs.closeSync(marker.handle);
+      marker.handle = undefined;
+      displaceAuthenticatedRegular(identity.launcherPath, parsed.launcherSha256);
+      displaceAuthenticatedRegular(identity.markerPath, sha256(marker.bytes));
+      process.stderr.write(
+        "koni: Core is no longer installed; removed its stale launcher. Reinstall with \`pi install npm:@koni/core\`.\\n",
+      );
+      process.exitCode = 127;
+      return;
+    }
+
+    const result = childProcess.spawnSync(
+      process.execPath,
+      [identity.launcherTarget, ...process.argv.slice(identity.argumentOffset)],
+      { env: process.env, stdio: "inherit" },
+    );
+    if (result.error) throw result.error;
+    if (result.signal) {
+      process.kill(process.pid, result.signal);
+      return;
+    }
+    process.exitCode = result.status === null ? 1 : result.status;
+  } finally {
+    if (launcher.handle !== undefined) fs.closeSync(launcher.handle);
+    if (marker && marker.handle !== undefined) fs.closeSync(marker.handle);
+  }
+}
+
+try {
+  main();
+} catch (error) {
+  process.stderr.write("koni: " + (error instanceof Error ? error.message : String(error)) + "\\n");
+  process.exitCode = 1;
+}
+`;
 }
 
 function adjacentTemporary(destination: string): string {
   return path.join(path.dirname(destination), `.${path.basename(destination)}.${randomUUID()}.tmp`);
+}
+
+function isAdjacentTemporaryFor(destination: string, candidate: string): boolean {
+  return (
+    path.isAbsolute(candidate) &&
+    path.dirname(candidate) === path.dirname(destination) &&
+    new RegExp(`^\\.${escapeRegExp(path.basename(destination))}\\.[0-9a-f-]{36}\\.tmp$`, "u").test(
+      path.basename(candidate),
+    )
+  );
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
 async function pathExistsNoFollow(candidate: string): Promise<boolean> {

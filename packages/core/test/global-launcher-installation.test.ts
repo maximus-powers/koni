@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmod,
+  lstat,
   mkdtemp,
   mkdir,
   readFile,
   readdir,
-  readlink,
   realpath,
   rename,
   rm,
@@ -47,7 +48,8 @@ describe("Pi-owned global launcher installation", () => {
     const activation = await activateGlobalLauncher(fixture.environment);
 
     expect(activation?.launcherPath).toBe(path.join(fixture.piBin, "koni"));
-    expect(await realpath(activation!.launcherPath)).toBe(await realpath(fixture.coreLauncher));
+    expect((await lstat(activation!.launcherPath)).isFile()).toBe(true);
+    await expect(runExecutable(activation!.launcherPath)).resolves.toMatchObject({ code: 0 });
     expect(JSON.parse(await readFile(fixture.markerPath, "utf8"))).toMatchObject({
       protocol: "koni.global-launcher.v1",
       launcherPath: path.join(fixture.piBin, "koni"),
@@ -149,6 +151,27 @@ describe("Pi-owned global launcher installation", () => {
     expect(await realpath(launcherPath)).toBe(await realpath(unrelatedTarget));
   });
 
+  it("does not treat a coordinated launcher and marker digest replacement as the same activation", async () => {
+    const fixture = await piUserPackageFixture("replaced-launcher-and-digest");
+    const activation = await activateGlobalLauncher(fixture.environment);
+    const unrelatedBytes = Buffer.from("unrelated authenticated-looking launcher\n", "utf8");
+    await unlink(activation!.launcherPath);
+    await writeFile(activation!.launcherPath, unrelatedBytes, { mode: 0o755 });
+    await writeFile(
+      fixture.markerPath,
+      `${JSON.stringify({
+        ...activation,
+        launcherSha256: createHash("sha256").update(unrelatedBytes).digest("hex"),
+      })}\n`,
+      { mode: 0o600 },
+    );
+
+    await expect(activateGlobalLauncher(fixture.environment)).rejects.toThrow(
+      /unrelated koni launcher/u,
+    );
+    expect(await readFile(activation!.launcherPath)).toEqual(unrelatedBytes);
+  });
+
   it("refuses unwritable launcher and existing marker directories before publication", async () => {
     const launcherFixture = await piUserPackageFixture("unwritable-launcher");
     await chmod(launcherFixture.piBin, 0o500);
@@ -190,8 +213,8 @@ describe("Pi-owned global launcher installation", () => {
     const activation = await activateGlobalLauncher(fixture.environment);
 
     expect(activation?.launcherPath).toBe(path.join(fixture.piBin, "koni.cmd"));
-    expect(await readFile(activation!.launcherPath, "utf8")).toBe(
-      `@node "${fixture.coreLauncher}" %*\r\n`,
+    expect(await readFile(activation!.launcherPath, "utf8")).toMatch(
+      /^@node -e "eval\(Buffer\.from\('[A-Za-z0-9_-]+','base64url'\)\.toString\('utf8'\)\)" -- %\*\r\n$/u,
     );
   });
 
@@ -228,8 +251,33 @@ describe("Pi-owned global launcher installation", () => {
 
     expect(first).toEqual(second);
     expect(first?.targetSha256).not.toBe(oldActivation?.targetSha256);
-    expect(await realpath(first!.launcherPath)).toBe(await realpath(newGeneration.coreLauncher));
+    expect((await lstat(first!.launcherPath)).isFile()).toBe(true);
+    await expect(runExecutable(first!.launcherPath)).resolves.toMatchObject({ code: 0 });
     expect(JSON.parse(await readFile(fixture.markerPath, "utf8"))).toEqual(first);
+  });
+
+  it("recovers an interrupted npm-style update that replaced Core at its fixed package root", async () => {
+    const fixture = await piUserPackageFixture("fixed-root-update");
+    const previous = await activateGlobalLauncher(fixture.environment);
+    await writeFile(fixture.coreLauncher, "#!/usr/bin/env node\n// fixed-root replacement\n", {
+      mode: 0o755,
+    });
+    const interruptedEnvironment = {
+      ...fixture.environment,
+      [GLOBAL_LAUNCHER_TEST_HOOK]: async (point: GlobalLauncherMutationPoint) => {
+        if (point === "before_launcher_rename") throw new Error("fixed-root update interrupted");
+      },
+    };
+
+    await expect(activateGlobalLauncher(interruptedEnvironment)).rejects.toThrow(
+      "fixed-root update interrupted",
+    );
+
+    const recovered = await activateGlobalLauncher(fixture.environment);
+    expect(recovered?.packageRoot).toBe(previous?.packageRoot);
+    expect(recovered?.targetSha256).not.toBe(previous?.targetSha256);
+    expect(JSON.parse(await readFile(fixture.markerPath, "utf8"))).toEqual(recovered);
+    await expect(runExecutable(recovered!.launcherPath)).resolves.toMatchObject({ code: 0 });
   });
 
   it("does not overwrite a launcher replaced after update authentication", async () => {
@@ -256,6 +304,7 @@ describe("Pi-owned global launcher installation", () => {
   it("never deletes a quarantine replaced after update validation", async () => {
     const fixture = await piUserPackageFixture("update-quarantine-race");
     const previous = await activateGlobalLauncher(fixture.environment);
+    const previousLauncherBytes = await readFile(previous!.launcherPath);
     const next = await addPackageGeneration(fixture, "update-quarantine-next");
     let quarantinePath: string | undefined;
     const racedEnvironment = {
@@ -264,7 +313,7 @@ describe("Pi-owned global launcher installation", () => {
         if (point !== "after_launcher_displaced_validation") return;
         quarantinePath = await replaceQuarantineWithUnrelated(
           fixture.piBin,
-          previous!.launcherTarget,
+          previousLauncherBytes,
           "unrelated update quarantine\n",
         );
       },
@@ -310,6 +359,7 @@ describe("Pi-owned global launcher installation", () => {
   it("never deletes a quarantine replaced after removal validation", async () => {
     const fixture = await piUserPackageFixture("removal-quarantine-race");
     const activation = await activateGlobalLauncher(fixture.environment);
+    const launcherBytes = await readFile(activation!.launcherPath);
     let quarantinePath: string | undefined;
     const racedEnvironment = {
       ...fixture.environment,
@@ -317,7 +367,7 @@ describe("Pi-owned global launcher installation", () => {
         if (point !== "after_launcher_removal_validation") return;
         quarantinePath = await replaceQuarantineWithUnrelated(
           fixture.piBin,
-          activation!.launcherTarget,
+          launcherBytes,
           "unrelated removal quarantine\n",
         );
       },
@@ -343,9 +393,7 @@ describe("Pi-owned global launcher installation", () => {
 
     await expect(removeGlobalLauncher(fixture.environment)).resolves.toBe("not_owner");
     expect(await readFile(externalMarker, "utf8")).toBe(markerBytes);
-    expect(await realpath(path.join(fixture.piBin, "koni"))).toBe(
-      await realpath(fixture.coreLauncher),
-    );
+    expect((await lstat(path.join(fixture.piBin, "koni"))).isFile()).toBe(true);
   });
 
   it.each([
@@ -371,10 +419,34 @@ describe("Pi-owned global launcher installation", () => {
       );
 
       const recovered = await activateGlobalLauncher(next.environment);
-      expect(await realpath(recovered!.launcherPath)).toBe(await realpath(next.coreLauncher));
+      expect((await lstat(recovered!.launcherPath)).isFile()).toBe(true);
+      await expect(runExecutable(recovered!.launcherPath)).resolves.toMatchObject({ code: 0 });
       expect(JSON.parse(await readFile(fixture.markerPath, "utf8"))).toEqual(recovered);
     },
   );
+
+  it("recovers an update interrupted after displacing the old launcher", async () => {
+    const fixture = await piUserPackageFixture("interruption-after-displacement");
+    await activateGlobalLauncher(fixture.environment);
+    const next = await addPackageGeneration(fixture, "next-after-displacement");
+    const interruptedEnvironment = {
+      ...next.environment,
+      [GLOBAL_LAUNCHER_TEST_HOOK]: async (point: GlobalLauncherMutationPoint) => {
+        if (point === "after_launcher_displaced_validation") {
+          throw new Error("crash after launcher displacement");
+        }
+      },
+    };
+
+    await expect(activateGlobalLauncher(interruptedEnvironment)).rejects.toThrow(
+      "crash after launcher displacement",
+    );
+    await expect(lstat(path.join(fixture.piBin, "koni"))).rejects.toMatchObject({ code: "ENOENT" });
+
+    const recovered = await activateGlobalLauncher(next.environment);
+    expect(JSON.parse(await readFile(fixture.markerPath, "utf8"))).toEqual(recovered);
+    await expect(runExecutable(recovered!.launcherPath)).resolves.toMatchObject({ code: 0 });
+  });
 
   it("never consumes a pending update as authority over an unrelated launcher", async () => {
     const fixture = await piUserPackageFixture("interrupted-collision");
@@ -402,6 +474,7 @@ describe("Pi-owned global launcher installation", () => {
     async (escapedGeneration) => {
       const fixture = await piUserPackageFixture(`recovery-${escapedGeneration}-escape`);
       const previous = await activateGlobalLauncher(fixture.environment);
+      const previousLauncherBytes = await readFile(previous!.launcherPath);
       const next = await addPackageGeneration(fixture, `recovery-${escapedGeneration}-next`);
       const interruptedEnvironment = {
         ...next.environment,
@@ -422,7 +495,7 @@ describe("Pi-owned global launcher installation", () => {
       );
 
       await expect(removeGlobalLauncher(next.environment)).rejects.toThrow(/escapes its package/u);
-      expect(await readlink(previous!.launcherPath)).toBe(previous!.launcherTarget);
+      expect(await readFile(previous!.launcherPath)).toEqual(previousLauncherBytes);
       expect(JSON.parse(await readFile(fixture.markerPath, "utf8"))).toEqual(previous);
     },
   );
@@ -430,6 +503,7 @@ describe("Pi-owned global launcher installation", () => {
   it("rejects a recovery target swapped between containment and digest authentication", async () => {
     const fixture = await piUserPackageFixture("recovery-auth-swap");
     const previous = await activateGlobalLauncher(fixture.environment);
+    const previousLauncherBytes = await readFile(previous!.launcherPath);
     const next = await addPackageGeneration(fixture, "recovery-auth-swap-next");
     const interruptedEnvironment = {
       ...next.environment,
@@ -454,7 +528,7 @@ describe("Pi-owned global launcher installation", () => {
     await expect(removeGlobalLauncher(recoveryEnvironment)).rejects.toThrow(
       /changed during authentication|escapes its package/u,
     );
-    expect(await readlink(previous!.launcherPath)).toBe(previous!.launcherTarget);
+    expect(await readFile(previous!.launcherPath)).toEqual(previousLauncherBytes);
     expect(JSON.parse(await readFile(fixture.markerPath, "utf8"))).toEqual(previous);
   });
 
@@ -478,6 +552,44 @@ describe("Pi-owned global launcher installation", () => {
 
     expect(result.code).toBe(1);
     expect(result.stderr).toMatch(/expected activate or remove/u);
+  });
+
+  it("self-cleans the authenticated launcher after Pi 0.80.10 removes Core through npm 11", async () => {
+    const fixture = await piUserPackageFixture("real-pi-remove");
+    const npmRoot = path.join(fixture.environment.agentDir, "npm");
+    await writeFile(
+      path.join(npmRoot, "package.json"),
+      `${JSON.stringify({
+        private: true,
+        dependencies: { "@koni/core": "1.0.0" },
+      })}\n`,
+    );
+    await writeFile(
+      path.join(fixture.environment.packageRoot, "package.json"),
+      `${JSON.stringify({ name: "@koni/core", version: "1.0.0" })}\n`,
+    );
+    await mkdir(fixture.environment.agentDir, { recursive: true });
+    await writeFile(
+      path.join(fixture.environment.agentDir, "settings.json"),
+      `${JSON.stringify({ packages: ["npm:@koni/core"], npmCommand: ["npm"] })}\n`,
+    );
+    const activation = await activateGlobalLauncher(fixture.environment);
+
+    const removal = await runPiRemove(fixture.environment.agentDir, fixture.root);
+
+    expect(removal.code).toBe(0);
+    expect(removal.stdout).toMatch(/Removed npm:@koni\/core/u);
+    await expect(lstat(fixture.environment.packageRoot)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await lstat(activation!.launcherPath)).isFile()).toBe(true);
+    expect((await lstat(fixture.markerPath)).isFile()).toBe(true);
+
+    const staleInvocation = await runExecutable(activation!.launcherPath);
+    expect(staleInvocation).toMatchObject({
+      code: 127,
+      stderr: expect.stringMatching(/Core is no longer installed.*pi install npm:@koni\/core/u),
+    });
+    await expect(lstat(activation!.launcherPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(fixture.markerPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
 
@@ -552,13 +664,13 @@ async function replacePackageBinWithExternalIdentical(
 
 async function replaceQuarantineWithUnrelated(
   directory: string,
-  expectedTarget: string,
+  expectedBytes: Buffer,
   bytes: string,
 ): Promise<string> {
   for (const entry of await readdir(directory)) {
     const candidate = path.join(directory, entry);
     try {
-      if ((await readlink(candidate)) !== expectedTarget) continue;
+      if (!(await readFile(candidate)).equals(expectedBytes)) continue;
       await unlink(candidate);
       await writeFile(candidate, bytes, { mode: 0o755 });
       return candidate;
@@ -598,4 +710,50 @@ async function runLifecycle(
     child.once("close", resolve);
   });
   return { code, stderr };
+}
+
+async function runPiRemove(
+  agentDir: string,
+  cwd: string,
+): Promise<{ code: number | null; stderr: string; stdout: string }> {
+  const piCli = path.resolve(
+    import.meta.dirname,
+    "../../../node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+  );
+  return runCommand(process.execPath, [piCli, "remove", "npm:@koni/core"], {
+    cwd,
+    env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
+  });
+}
+
+async function runExecutable(
+  executable: string,
+): Promise<{ code: number | null; stderr: string; stdout: string }> {
+  return runCommand(executable, [], { cwd: path.dirname(executable), env: process.env });
+}
+
+async function runCommand(
+  command: string,
+  args: string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv },
+): Promise<{ code: number | null; stderr: string; stdout: string }> {
+  const child = spawn(command, args, {
+    ...options,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  const code = await new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+  return { code, stderr, stdout };
 }
