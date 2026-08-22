@@ -10,9 +10,14 @@ export interface InitializeProjectProfileInput {
   profilePackageRoot: string;
 }
 
+export type SuccessfulProjectConfigurationStatus = ProjectConfigurationStatus & {
+  ok: true;
+  configuration: NonNullable<ProjectConfigurationStatus["configuration"]>;
+};
+
 export interface InitializedProjectProfile {
   installation: Awaited<ReturnType<typeof installAndCacheProfile>>;
-  validation: Extract<Awaited<ReturnType<typeof validateProjectConfiguration>>, { ok: true }>;
+  validation: SuccessfulProjectConfigurationStatus;
 }
 
 export class ProjectInitializationError extends Error {
@@ -51,6 +56,6 @@ export async function initializeProjectProfile(
 
 function validConfiguration(
   validation: ProjectConfigurationStatus,
-): validation is Extract<ProjectConfigurationStatus, { ok: true }> {
+): validation is SuccessfulProjectConfigurationStatus {
   return validation.ok === true && validation.configuration !== undefined;
 }

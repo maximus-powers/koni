@@ -55,12 +55,13 @@ describe("initializeProjectProfile", () => {
       return validConfiguration;
     });
 
-    await expect(
-      initializeProjectProfile(
-        { projectRoot: "/nested/project", profilePackageRoot: "/profiles/coding" },
-        { install, validate },
-      ),
-    ).resolves.toEqual({ installation, validation: validConfiguration });
+    const initialized = await initializeProjectProfile(
+      { projectRoot: "/nested/project", profilePackageRoot: "/profiles/coding" },
+      { install, validate },
+    );
+
+    expect(initialized).toEqual({ installation, validation: validConfiguration });
+    expect(initialized.validation.configuration.sha256).toBe(`sha256:${"c".repeat(64)}`);
 
     expect(install).toHaveBeenCalledOnce();
     expect(validate).toHaveBeenCalledOnce();
