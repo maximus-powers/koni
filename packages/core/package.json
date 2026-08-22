@@ -57,6 +57,8 @@
   },
   "scripts": {
     "build": "node ../../scripts/clean-package-build.mjs . && tsc -p tsconfig.build.json && node ../../scripts/copy-core-skills.mjs && node ../../scripts/embed-core-build-identity.mjs",
+    "postinstall": "node ./bin/koni-package-lifecycle.js activate",
+    "preuninstall": "node ./bin/koni-package-lifecycle.js remove",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "check": "npm run typecheck && npm run test && npm run build"
