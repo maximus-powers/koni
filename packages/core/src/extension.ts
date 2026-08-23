@@ -86,7 +86,7 @@ const KONI_CORE_DISCOVER_EVENT = "koni.core.discover.v1";
 const KONI_CORE_AVAILABLE_EVENT = "koni.core.available.v1";
 const KONI_CORE_INSTANCE_PROTOCOL = "koni.core-instance.v1";
 const CONFIGURE_HANDOFF =
-  "Use $configure-koni to inspect this initialized repository, propose the smallest evidence-backed project configuration, wait for my approval before editing, and validate the complete configuration after applying approved changes. Do not create a run.";
+  "Use $configure-koni to inspect this initialized repository. Research its instructions, architecture, manifests, CI, tests, and domain boundaries, then walk me through the installed profile's graph ontology. Present an evidence-backed audit of what to retain, change, add, or remove across graph semantics, proof, workflows, run types, agents, and workspace readiness. Ask only high-impact questions, propose the smallest coherent adaptation, and wait for my approval before editing. Validate the complete configuration after applying approved changes. Do not create a run.";
 
 interface KoniCoreInstanceDescriptor {
   protocol: typeof KONI_CORE_INSTANCE_PROTOCOL;

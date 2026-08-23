@@ -9,7 +9,7 @@ import type { ProfileInstallResult } from "../src/profile/install.js";
 import { createKoniCoreExtension } from "../src/extension.js";
 
 const CONFIGURE_HANDOFF =
-  "Use $configure-koni to inspect this initialized repository, propose the smallest evidence-backed project configuration, wait for my approval before editing, and validate the complete configuration after applying approved changes. Do not create a run.";
+  "Use $configure-koni to inspect this initialized repository. Research its instructions, architecture, manifests, CI, tests, and domain boundaries, then walk me through the installed profile's graph ontology. Present an evidence-backed audit of what to retain, change, add, or remove across graph semantics, proof, workflows, run types, agents, and workspace readiness. Ask only high-impact questions, propose the smallest coherent adaptation, and wait for my approval before editing. Validate the complete configuration after applying approved changes. Do not create a run.";
 
 describe("installed Pi companion integration", () => {
   it("autostarts the authority and attaches read-only on trusted initialized startup, cleaning every passive surface on shutdown", async () => {
